@@ -333,6 +333,10 @@ h1 {
 .section-heading span {
   color: var(--muted);
   font-size: 13px;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .route-list {
@@ -348,10 +352,8 @@ h1 {
   padding: 13px 14px;
   border: 1px solid var(--line);
   background: rgba(255, 255, 255, 0.44);
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 12px;
+  display: grid;
+  gap: 8px;
 }
 
 .route-list li.loading {
@@ -375,21 +377,29 @@ h1 {
 }
 
 .route-list .segment {
+  display: block;
   font-weight: 700;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .route-list .route-status {
   color: var(--muted);
   font-size: 12px;
   line-height: 1.35;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .route-list .meta {
-  flex: 0 0 auto;
   color: var(--muted);
   font: 700 12px/1.35 ui-monospace, Consolas, monospace;
-  text-align: right;
+  text-align: left;
   white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .empty-state {
@@ -622,14 +632,16 @@ h1 {
 
 .city-detail-label,
 .landmark-label,
-.station-label {
+.station-label,
+.subway-label {
   pointer-events: none;
   white-space: nowrap;
 }
 
 .city-detail-label span,
 .landmark-label span,
-.station-label span {
+.station-label span,
+.subway-label span {
   display: inline-block;
   padding: 2px 5px;
   border: 1px solid rgba(35, 79, 68, 0.12);
@@ -647,6 +659,10 @@ h1 {
 
 .station-label span {
   color: #21506f;
+}
+
+.subway-label span {
+  color: #0f6f68;
 }
 
 .landmark-marker {
@@ -714,6 +730,19 @@ h1 {
   color: #fffaf0;
   box-shadow: 0 8px 16px rgba(35, 47, 41, 0.22);
   font: 900 12px/1 "Noto Serif SC", Georgia, serif;
+}
+
+.subway-marker {
+  width: 18px;
+  height: 18px;
+  display: grid;
+  place-items: center;
+  border: 2px solid #fffaf0;
+  border-radius: 50%;
+  background: #0f8f83;
+  color: #fffaf0;
+  box-shadow: 0 8px 16px rgba(35, 47, 41, 0.2);
+  font: 900 11px/1 "Noto Serif SC", Georgia, serif;
 }
 
 .round-button {

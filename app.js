@@ -273,6 +273,79 @@ const taiwanRegion = {
   anchor: "\u53f0\u6e7e",
   isRegion: true
 };
+const subwayStationCatalog = {
+  beijing: [
+    { name: "\u5929\u5b89\u95e8\u4e1c\u7ad9", lon: 116.407, lat: 39.908 },
+    { name: "\u738b\u5e9c\u4e95\u7ad9", lon: 116.411, lat: 39.908 },
+    { name: "\u897f\u5355\u7ad9", lon: 116.374, lat: 39.907 },
+    { name: "\u56fd\u8d38\u7ad9", lon: 116.46, lat: 39.909 },
+    { name: "\u4e09\u5143\u6865\u7ad9", lon: 116.456, lat: 39.961 }
+  ],
+  shanghai: [
+    { name: "\u4eba\u6c11\u5e7f\u573a\u7ad9", lon: 121.475, lat: 31.233 },
+    { name: "\u9646\u5bb6\u5634\u7ad9", lon: 121.502, lat: 31.239 },
+    { name: "\u5357\u4eac\u4e1c\u8def\u7ad9", lon: 121.484, lat: 31.239 },
+    { name: "\u9759\u5b89\u5bfa\u7ad9", lon: 121.446, lat: 31.224 },
+    { name: "\u4e0a\u6d77\u706b\u8f66\u7ad9\u7ad9", lon: 121.455, lat: 31.249 }
+  ],
+  guangzhou: [
+    { name: "\u516c\u56ed\u524d\u7ad9", lon: 113.265, lat: 23.125 },
+    { name: "\u4f53\u80b2\u897f\u8def\u7ad9", lon: 113.321, lat: 23.132 },
+    { name: "\u73e0\u6c5f\u65b0\u57ce\u7ad9", lon: 113.321, lat: 23.119 },
+    { name: "\u5ba2\u6751\u7ad9", lon: 113.321, lat: 23.096 },
+    { name: "\u5e7f\u5dde\u5357\u7ad9\u7ad9", lon: 113.269, lat: 22.989 }
+  ],
+  shenzhen: [
+    { name: "\u4f1a\u5c55\u4e2d\u5fc3\u7ad9", lon: 114.062, lat: 22.535 },
+    { name: "\u8d2d\u7269\u516c\u56ed\u7ad9", lon: 114.054, lat: 22.539 },
+    { name: "\u4e16\u754c\u4e4b\u7a97\u7ad9", lon: 113.973, lat: 22.539 },
+    { name: "\u8001\u8857\u7ad9", lon: 114.118, lat: 22.544 },
+    { name: "\u6df1\u5733\u5317\u7ad9\u7ad9", lon: 114.029, lat: 22.61 }
+  ],
+  chengdu: [
+    { name: "\u5929\u5e9c\u5e7f\u573a\u7ad9", lon: 104.066, lat: 30.657 },
+    { name: "\u6625\u7199\u8def\u7ad9", lon: 104.081, lat: 30.655 },
+    { name: "\u7701\u4f53\u80b2\u9986\u7ad9", lon: 104.064, lat: 30.637 },
+    { name: "\u6210\u90fd\u4e1c\u5ba2\u7ad9\u7ad9", lon: 104.142, lat: 30.63 },
+    { name: "\u4e00\u54c1\u5929\u4e0b\u7ad9", lon: 104.026, lat: 30.689 }
+  ],
+  wuhan: [
+    { name: "\u6c5f\u6c49\u8def\u7ad9", lon: 114.29, lat: 30.585 },
+    { name: "\u5faa\u793c\u95e8\u7ad9", lon: 114.285, lat: 30.593 },
+    { name: "\u6d2a\u5c71\u5e7f\u573a\u7ad9", lon: 114.337, lat: 30.543 },
+    { name: "\u6b66\u6c49\u706b\u8f66\u7ad9\u7ad9", lon: 114.425, lat: 30.607 },
+    { name: "\u5149\u8c37\u5e7f\u573a\u7ad9", lon: 114.405, lat: 30.506 }
+  ],
+  xian: [
+    { name: "\u949f\u697c\u7ad9", lon: 108.94, lat: 34.261 },
+    { name: "\u5c0f\u5be8\u7ad9", lon: 108.953, lat: 34.229 },
+    { name: "\u5927\u96c1\u5854\u7ad9", lon: 108.964, lat: 34.219 },
+    { name: "\u5317\u5927\u8857\u7ad9", lon: 108.946, lat: 34.27 },
+    { name: "\u897f\u5b89\u5317\u7ad9\u7ad9", lon: 108.945, lat: 34.382 }
+  ],
+  nanjing: [
+    { name: "\u65b0\u8857\u53e3\u7ad9", lon: 118.784, lat: 32.041 },
+    { name: "\u5927\u884c\u5bab\u7ad9", lon: 118.796, lat: 32.044 },
+    { name: "\u9f13\u697c\u7ad9", lon: 118.779, lat: 32.064 },
+    { name: "\u5357\u4eac\u7ad9\u7ad9", lon: 118.803, lat: 32.088 },
+    { name: "\u5357\u4eac\u5357\u7ad9\u7ad9", lon: 118.797, lat: 31.971 }
+  ],
+  hangzhou: [
+    { name: "\u9f99\u7fd4\u6865\u7ad9", lon: 120.169, lat: 30.258 },
+    { name: "\u51e4\u8d77\u8def\u7ad9", lon: 120.164, lat: 30.267 },
+    { name: "\u6b66\u6797\u5e7f\u573a\u7ad9", lon: 120.164, lat: 30.276 },
+    { name: "\u676d\u5dde\u4e1c\u7ad9\u7ad9", lon: 120.219, lat: 30.291 },
+    { name: "\u5b9a\u5b89\u8def\u7ad9", lon: 120.168, lat: 30.247 }
+  ],
+  chongqing: [
+    { name: "\u89e3\u653e\u7891\u7ad9", lon: 106.577, lat: 29.558 },
+    { name: "\u8f83\u573a\u53e3\u7ad9", lon: 106.574, lat: 29.554 },
+    { name: "\u4e24\u8def\u53e3\u7ad9", lon: 106.55, lat: 29.552 },
+    { name: "\u89c2\u97f3\u6865\u7ad9", lon: 106.532, lat: 29.578 },
+    { name: "\u6c99\u576a\u575d\u7ad9", lon: 106.456, lat: 29.559 }
+  ]
+};
+
 const provinceCodeNames = {
   11: "\u5317\u4eac",
   12: "\u5929\u6d25",
@@ -318,6 +391,8 @@ const state = {
   activeDistrictBoundaryCount: 0,
   activeLandmarkCount: 0,
   activeStationCount: 0,
+  activeSubwayLineCount: 0,
+  activeSubwayStationCount: 0,
   pendingCityClickTimer: null,
   routes: [],
   nextRouteId: 1,
@@ -337,7 +412,10 @@ const state = {
   cityAdcodes: new Map(),
   cityBoundaryCache: new Map(),
   stationCache: new Map(),
+  subwayStationCache: new Map(),
   landmarkCache: new Map(),
+  metroNetworkData: null,
+  metroNetworkPromise: null,
   passengerStationNames: null,
   passengerStationNamesPromise: null,
   searchResults: [],
@@ -888,24 +966,51 @@ function renderRoutes() {
     const from = placeById(route.from);
     const to = placeById(route.to);
     if (!from || !to) return;
+    const routePoints = curvedRoutePoints(from, to);
 
-    L.polyline([[from.lat, from.lon], [to.lat, to.lon]], {
+    L.polyline(routePoints, {
       renderer: state.canvasRenderer,
       color: route.status === "error" ? "#d75b4f" : "#1f9d8a",
-      weight: 12,
-      opacity: 0.14,
+      weight: 9,
+      opacity: 0.11,
       interactive: false
     }).addTo(state.routeLayer);
 
-    L.polyline([[from.lat, from.lon], [to.lat, to.lon]], {
+    L.polyline(routePoints, {
       renderer: state.canvasRenderer,
       color: route.status === "error" ? "#d75b4f" : route.status === "loading" ? "#e7aa38" : "#168f7d",
-      weight: 4,
-      opacity: 0.92,
-      dashArray: route.status === "success" ? "12 8" : route.status === "error" ? "4 10" : "6 10",
+      weight: 3.2,
+      opacity: 0.78,
+      dashArray: route.status === "success" ? "10 9" : route.status === "error" ? "4 10" : "6 10",
       lineCap: "round",
       interactive: false
     }).addTo(state.routeLayer);
+  });
+}
+
+function curvedRoutePoints(from, to) {
+  const start = { lat: from.lat, lon: from.lon };
+  const end = { lat: to.lat, lon: to.lon };
+  const deltaLat = end.lat - start.lat;
+  const deltaLon = end.lon - start.lon;
+  const distance = Math.hypot(deltaLat, deltaLon);
+  if (!distance) return [[start.lat, start.lon], [end.lat, end.lon]];
+
+  const curve = Math.min(distance * 0.16, 0.16);
+  const normalLat = -deltaLon / distance;
+  const normalLon = deltaLat / distance;
+  const control = {
+    lat: (start.lat + end.lat) / 2 + normalLat * curve,
+    lon: (start.lon + end.lon) / 2 + normalLon * curve
+  };
+
+  return Array.from({ length: 18 }, (_, index) => {
+    const t = index / 17;
+    const inv = 1 - t;
+    return [
+      inv * inv * start.lat + 2 * inv * t * control.lat + t * t * end.lat,
+      inv * inv * start.lon + 2 * inv * t * control.lon + t * t * end.lon
+    ];
   });
 }
 
@@ -915,13 +1020,13 @@ function renderPanel() {
 
   if (state.viewMode === "city") {
     const activeCity = cityById(state.activeCityViewId);
-    const detailCounts = activeCity ? cityDetailCounts(activeCity) : { subareas: 0, landmarks: 0, stations: 0 };
+    const detailCounts = activeCity ? cityDetailCounts(activeCity) : { subareas: 0, landmarks: 0, stations: 0, subwayStations: 0 };
     const subareaText = state.activeDistrictBoundaryCount
       ? `${state.activeDistrictBoundaryCount} \u4e2a\u4e0b\u8f96\u533a\u57df\u8fb9\u754c`
       : `${detailCounts.subareas} \u4e2a\u533a\u53bf\u70b9`;
     selectionTitle.textContent = activeCity ? `\u57ce\u5e02\u89c6\u56fe\uff1a${activeCity.name}` : "\u57ce\u5e02\u89c6\u56fe";
     selectionHint.textContent = activeCity
-      ? `\u5df2\u9690\u85cf\u4e2d\u56fd\u603b\u56fe\uff0c\u6b63\u5728\u663e\u793a ${subareaText}\u3001${detailCounts.landmarks} \u4e2a\u5730\u6807/\u666f\u70b9\u4e0e ${state.activeStationCount} \u4e2a\u706b\u8f66\u7ad9\uff0c\u533a\u53bf\u8fb9\u754c\u53ef\u70b9\u51fb\u7eb3\u5165\u884c\u7a0b\u3002`
+      ? `\u5df2\u9690\u85cf\u4e2d\u56fd\u603b\u56fe\uff0c\u6b63\u5728\u663e\u793a ${subareaText}\u3001${detailCounts.landmarks} \u4e2a\u5730\u6807/\u666f\u70b9\u3001${state.activeStationCount} \u4e2a\u706b\u8f66\u7ad9\u4e0e ${state.activeSubwayLineCount} \u6761\u5730\u94c1\u7ebf\u8def/${state.activeSubwayStationCount} \u4e2a\u5730\u94c1\u7ad9\uff0c\u533a\u53bf\u8fb9\u754c\u53ef\u70b9\u51fb\u7eb3\u5165\u884c\u7a0b\u3002`
       : "\u53cc\u51fb\u57ce\u5e02\u53ef\u8fdb\u5165\u72ec\u7acb\u57ce\u5e02\u89c6\u56fe\u3002";
   } else if (selected) {
     selectionTitle.textContent = labels.fromCity(selected.name);
@@ -955,8 +1060,8 @@ function renderPanel() {
   cityCount.textContent = String(state.cities.length);
   if (state.viewMode === "city") {
     const activeCity = cityById(state.activeCityViewId);
-    const detailCounts = activeCity ? cityDetailCounts(activeCity) : { subareas: 0, landmarks: 0, stations: 0 };
-    availableCityCount.textContent = String(detailCounts.subareas + detailCounts.landmarks + state.activeStationCount);
+    const detailCounts = activeCity ? cityDetailCounts(activeCity) : { subareas: 0, landmarks: 0, stations: 0, subwayStations: 0 };
+    availableCityCount.textContent = String(detailCounts.subareas + detailCounts.landmarks + state.activeStationCount + state.activeSubwayStationCount);
     if (mapBadgeLabel) mapBadgeLabel.textContent = "\u57ce\u5e02\u5185\u70b9\u4f4d";
   } else {
     availableCityCount.textContent = String(state.cities.length);
@@ -1092,6 +1197,8 @@ function exitCityView(options = {}) {
   state.activeDistrictBoundaryCount = 0;
   state.activeLandmarkCount = 0;
   state.activeStationCount = 0;
+  state.activeSubwayLineCount = 0;
+  state.activeSubwayStationCount = 0;
   if (state.cityDetailLayer) state.cityDetailLayer.clearLayers();
 
   [state.chinaLayer, state.routeLayer, state.cityLayer, state.labelLayer].forEach((layer) => {
@@ -1231,6 +1338,36 @@ async function renderCityDetail(city) {
       })
       .addTo(state.cityDetailLayer);
     addDetailLabel(station.name, station.lat, station.lon, "station-label", 13);
+  });
+
+  const metroNetwork = await resolveCityMetroNetwork(city);
+  if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
+  state.activeSubwayLineCount = metroNetwork.lines.length;
+  renderMetroLines(metroNetwork, detailBounds);
+
+  const subwayStations = await resolveCitySubwayStations(city, detailBounds, boundaryData, metroNetwork);
+  if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
+  state.activeSubwayStationCount = subwayStations.length;
+
+  subwayStations.forEach((station) => {
+    detailBounds.extend([station.lat, station.lon]);
+    L.circleMarker([station.lat, station.lon], {
+      renderer: state.canvasRenderer,
+      radius: station.source === "metro-network" ? 3.4 : 4.4,
+      color: "#fffaf0",
+      weight: 1,
+      fillColor: metroColor(station.color),
+      fillOpacity: 0.96,
+      opacity: 1
+    })
+      .bindTooltip(`${station.name} / ${station.lineName ? `${station.lineName} ` : ""}\u5730\u94c1\u7ad9`, {
+        className: "city-tooltip",
+        direction: "top",
+        offset: [0, -8],
+        opacity: 1,
+        sticky: true
+      })
+      .addTo(state.cityDetailLayer);
   });
 
   if (!detailBounds.isValid()) return;
@@ -1481,6 +1618,119 @@ async function resolveCityStations(city, bounds, boundaryData) {
   return filteredStations;
 }
 
+async function resolveCityMetroNetwork(city) {
+  const empty = { lines: [], stations: [] };
+  const data = await loadMetroNetworkData();
+  if (!data || !data.networks) return empty;
+
+  const keys = metroCityKeys(city);
+  const key = keys.find((item) => data.networks[item]);
+  return key ? data.networks[key] : empty;
+}
+
+async function loadMetroNetworkData() {
+  if (state.metroNetworkData) return state.metroNetworkData;
+  if (state.metroNetworkPromise) return state.metroNetworkPromise;
+
+  state.metroNetworkPromise = fetch("./data/metro-networks.json", { cache: "force-cache" })
+    .then((response) => {
+      if (!response.ok) throw new Error(`HTTP ${response.status}`);
+      return response.json();
+    })
+    .then((data) => {
+      state.metroNetworkData = data;
+      return data;
+    })
+    .catch((error) => {
+      console.warn("metro network data unavailable", error);
+      state.metroNetworkData = { networks: {} };
+      return state.metroNetworkData;
+    });
+
+  return state.metroNetworkPromise;
+}
+
+function metroCityKeys(city) {
+  const key = normalizeKey(city.pinyin || city.name);
+  const aliases = {
+    hongkong: "xianggang",
+    harbin: "haerbin",
+    urumqi: "wulumuqi",
+    wulumuqi: "wulumuqi",
+    hohhot: "huhehaote",
+    huhehaote: "huhehaote",
+    xian: "xian"
+  };
+  return Array.from(new Set([aliases[key], key, normalizeKey(city.name)].filter(Boolean)));
+}
+
+function renderMetroLines(network, detailBounds) {
+  (network.lines || []).forEach((line) => {
+    const points = (line.coordinates || [])
+      .map((coord) => [Number(coord[1]), Number(coord[0])])
+      .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+    if (points.length < 2) return;
+    points.forEach((point) => detailBounds.extend(point));
+
+    L.polyline(points, {
+      renderer: state.canvasRenderer,
+      color: "#fffaf0",
+      weight: 7,
+      opacity: 0.74,
+      interactive: false,
+      lineCap: "round",
+      lineJoin: "round"
+    }).addTo(state.cityDetailLayer);
+
+    L.polyline(points, {
+      renderer: state.canvasRenderer,
+      color: metroColor(line.color),
+      weight: 4,
+      opacity: 0.92,
+      interactive: true,
+      lineCap: "round",
+      lineJoin: "round"
+    })
+      .bindTooltip(`${line.name} / \u5730\u94c1\u7ebf\u8def`, {
+        className: "city-tooltip",
+        direction: "top",
+        opacity: 1,
+        sticky: true
+      })
+      .addTo(state.cityDetailLayer);
+  });
+}
+
+function metroColor(color) {
+  const text = String(color || "").replace(/^#/, "").trim();
+  return /^[0-9a-f]{6}$/i.test(text) ? `#${text}` : "#0f8f83";
+}
+
+async function resolveCitySubwayStations(city, bounds, boundaryData, metroNetwork = null) {
+  const cacheKey = state.cityAdcodes.get(city.id) || city.id;
+  if (state.subwayStationCache.has(cacheKey)) return state.subwayStationCache.get(cacheKey);
+
+  if (metroNetwork && Array.isArray(metroNetwork.stations) && metroNetwork.stations.length) {
+    const stations = metroNetwork.stations.map((station) => ({
+      ...station,
+      source: "metro-network"
+    }));
+    state.subwayStationCache.set(cacheKey, stations);
+    return stations;
+  }
+
+  const curatedStations = citySubwayStations(city).map((station) => ({ ...station, source: "curated" }));
+  const liveStations = await fetchSubwayStationsFromOsm(city, bounds);
+  const filteredStations = boundaryData ? liveStations.filter((station) => pointInGeoJson(station, boundaryData)) : liveStations;
+  const stations = mergeSubwayStations(curatedStations, filteredStations.length ? filteredStations : liveStations, city);
+  state.subwayStationCache.set(cacheKey, stations);
+  return stations;
+}
+
+function citySubwayStations(city) {
+  return catalogEntry(subwayStationCatalog, city) || [];
+}
+
 async function fetchPassengerStationNames() {
   if (state.passengerStationNames) return state.passengerStationNames;
   if (state.passengerStationNamesPromise) return state.passengerStationNamesPromise;
@@ -1536,6 +1786,36 @@ async function fetchRailwayStationsFromOsm(city, bounds, passengerStationNames) 
   }
 }
 
+async function fetchSubwayStationsFromOsm(city, bounds) {
+  if (!bounds || !bounds.isValid()) return [];
+  const bbox = bounds.pad(0.03);
+  const south = bbox.getSouth().toFixed(5);
+  const west = bbox.getWest().toFixed(5);
+  const north = bbox.getNorth().toFixed(5);
+  const east = bbox.getEast().toFixed(5);
+  const filters = [
+    "[railway=station][station=subway]",
+    "[railway=station][subway=yes]",
+    "[public_transport=station][subway=yes]",
+    "[station=subway]",
+    "[railway=halt][station=subway]",
+    "[railway=subway_entrance][name]"
+  ];
+  const queryBody = ["node", "way", "relation"]
+    .flatMap((type) => filters.map((filter) => `${type}(${south},${west},${north},${east})${filter};`))
+    .join("");
+  const query = `[out:json][timeout:12];(${queryBody});out center tags 220;`;
+  const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
+
+  try {
+    const data = await fetchJsonWithTimeout(url, { cache: "force-cache" }, 3500);
+    return normalizeOsmSubwayStations(data.elements || [], city);
+  } catch (error) {
+    if (error.name !== "AbortError") console.warn("subway station fallback", city.name, error);
+    return [];
+  }
+}
+
 async function fetchJsonWithTimeout(url, options = {}, timeoutMs = 6500) {
   const controller = new AbortController();
   const timer = window.setTimeout(() => controller.abort(), timeoutMs);
@@ -1576,6 +1856,95 @@ function normalizeOsmStations(elements, city, passengerStationNames) {
   return stations
     .sort((a, b) => distanceToCity(a, city) - distanceToCity(b, city))
     .slice(0, 24);
+}
+
+function normalizeOsmSubwayStations(elements, city) {
+  const stationsByName = new Map();
+
+  elements.forEach((element) => {
+    const tags = element.tags || {};
+    if (!isSubwayStation(tags)) return;
+
+    const lon = Number.isFinite(element.lon) ? element.lon : element.center && element.center.lon;
+    const lat = Number.isFinite(element.lat) ? element.lat : element.center && element.center.lat;
+    if (!Number.isFinite(lon) || !Number.isFinite(lat)) return;
+
+    const rawName = tags["name:zh"] || tags.name || tags["name:en"];
+    if (!rawName) return;
+    const name = normalizeSubwayStationName(rawName);
+    if (!name || isDisallowedSubwayStationName(name)) return;
+
+    const key = normalizeStationLookupName(name);
+    const priority = subwayStationPriority(tags, name);
+    const existing = stationsByName.get(key);
+    if (existing && existing.priority <= priority) return;
+    stationsByName.set(key, {
+      name,
+      lon,
+      lat,
+      source: "openstreetmap",
+      priority
+    });
+  });
+
+  return Array.from(stationsByName.values())
+    .map(({ priority, ...station }) => station)
+    .sort((a, b) => distanceToCity(a, city) - distanceToCity(b, city))
+    .slice(0, 160);
+}
+
+function mergeSubwayStations(curated, live, city) {
+  const seen = new Set();
+  return [...curated, ...live]
+    .filter((station) => Number.isFinite(station.lon) && Number.isFinite(station.lat) && station.name)
+    .sort((a, b) => Number(a.source !== "curated") - Number(b.source !== "curated") || distanceToCity(a, city) - distanceToCity(b, city))
+    .filter((station) => {
+      const key = normalizeStationLookupName(station.name);
+      if (!key || seen.has(key)) return false;
+      seen.add(key);
+      return true;
+    })
+    .slice(0, 160);
+}
+
+function isSubwayStation(tags) {
+  const railway = String(tags.railway || "").toLowerCase();
+  const station = String(tags.station || "").toLowerCase();
+  const subway = String(tags.subway || "").toLowerCase();
+  const publicTransport = String(tags.public_transport || "").toLowerCase();
+  const network = normalizeSearchText(tags.network || tags.operator || "");
+  return (
+    station === "subway" ||
+    subway === "yes" ||
+    railway === "subway_entrance" ||
+    (railway === "station" && (network.includes("metro") || network.includes("subway") || network.includes("\u5730\u94c1") || network.includes("\u8f68\u9053\u4ea4\u901a"))) ||
+    (publicTransport === "station" && (network.includes("metro") || network.includes("subway") || network.includes("\u5730\u94c1") || network.includes("\u8f68\u9053\u4ea4\u901a")))
+  );
+}
+
+function subwayStationPriority(tags, name) {
+  const railway = String(tags.railway || "").toLowerCase();
+  const station = String(tags.station || "").toLowerCase();
+  if (station === "subway" && railway === "station") return 0;
+  if (station === "subway") return 1;
+  if (railway === "station") return 2;
+  if (railway === "subway_entrance") return 5;
+  return 9;
+}
+
+function normalizeSubwayStationName(name) {
+  const text = String(name || "")
+    .trim()
+    .replace(/\s+/g, " ")
+    .replace(/(?:\s|,|-)*(?:exit|entrance)\s*[a-z0-9-]*$/i, "")
+    .replace(/[A-Z0-9\uff21-\uff3a\uff10-\uff19]*\s*(?:\u53e3|\u51fa\u5165\u53e3|\u51fa\u53e3)$/u, "")
+    .trim();
+  if (!text) return "";
+  return /\u7ad9$/u.test(text) ? text : `${text}\u7ad9`;
+}
+
+function isDisallowedSubwayStationName(name) {
+  return /\u51fa\u5165\u53e3|\u51fa\u53e3|\u7535\u68af|\u901a\u9053|\u6362\u4e58\u5385|\u505c\u8f66\u573a|\u8f66\u8f86\u6bb5|\u505c\u8f66\u573a|\u8f66\u5e93/u.test(String(name || ""));
 }
 
 function isRailwayTrainStation(tags) {
@@ -1671,7 +2040,8 @@ function cityDetailCounts(city) {
   return {
     subareas: citySubareas(city).length,
     landmarks: state.activeLandmarkCount || cityLandmarks(city).length,
-    stations: state.activeStationCount
+    stations: state.activeStationCount,
+    subwayStations: state.activeSubwayStationCount
   };
 }
 
