@@ -1,0 +1,12 @@
+{
+  "pages": [
+    "pages/index/index"
+  ],
+  "window": {
+    "navigationBarTitleText": "旅行行程规划",
+    "navigationBarBackgroundColor": "#255848",
+    "navigationBarTextStyle": "white",
+    "backgroundColor": "#f4f1e7"
+  },
+  "sitemapLocation": "sitemap.json"
+}
