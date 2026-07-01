@@ -1,0 +1,19 @@
+{
+  "description": "Route Studio 微信小程序版",
+  "packOptions": {
+    "ignore": []
+  },
+  "setting": {
+    "urlCheck": false,
+    "es6": true,
+    "enhance": true,
+    "postcss": true,
+    "minified": true
+  },
+  "compileType": "miniprogram",
+  "libVersion": "latest",
+  "appid": "touristappid",
+  "projectname": "interface-map-mini-program",
+  "miniprogramRoot": "miniprogram/",
+  "condition": {}
+}

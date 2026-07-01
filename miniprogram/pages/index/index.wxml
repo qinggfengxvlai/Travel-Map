@@ -1,0 +1,98 @@
+<view class="page">
+  <view class="map-wrap">
+    <map
+      id="travelMap"
+      class="map"
+      longitude="{{mapCenter.longitude}}"
+      latitude="{{mapCenter.latitude}}"
+      scale="{{mapScale}}"
+      markers="{{markers}}"
+      polyline="{{polylines}}"
+      include-points="{{includePoints}}"
+      bindmarkertap="onMarkerTap"
+      show-location="{{false}}"
+    />
+    <view class="map-badge">
+      <text class="map-badge-number">{{badgeCount}}</text>
+      <text>{{viewMode === 'city' ? '城市内点位' : '可点击城市'}}</text>
+    </view>
+  </view>
+
+  <view class="panel">
+    <view class="brand">
+      <view class="brand-mark"></view>
+      <view>
+        <text class="eyebrow">Route Studio</text>
+        <text class="title">旅行行程规划</text>
+      </view>
+    </view>
+
+    <view class="status-card">
+      <text class="label">当前操作</text>
+      <text class="status-title">{{selectionTitle}}</text>
+      <text class="status-hint">{{selectionHint}}</text>
+    </view>
+
+    <view class="search-panel">
+      <text class="label">搜索城市/区县</text>
+      <view class="search-box">
+        <input value="{{query}}" placeholder="输入城市、区县或拼音" bindinput="onSearchInput" confirm-type="search" />
+        <button wx:if="{{query}}" class="clear-search" bindtap="clearSearch">×</button>
+      </view>
+      <view wx:if="{{searchResults.length}}" class="search-results">
+        <button wx:for="{{searchResults}}" wx:key="id" class="search-result" data-id="{{item.id}}" bindtap="selectSearchResult">
+          <text>{{item.name}}</text>
+          <text>{{item.subtitle}}</text>
+        </button>
+      </view>
+    </view>
+
+    <view class="transport-panel">
+      <text class="label">交通工具</text>
+      <view class="transport-toggle">
+        <button class="transport-option {{transportMode === 'highspeed' ? 'active' : ''}}" data-mode="highspeed" bindtap="setTransportMode">⚡ 高铁</button>
+        <button class="transport-option {{transportMode === 'train' ? 'active' : ''}}" data-mode="train" bindtap="setTransportMode">● 火车</button>
+      </view>
+    </view>
+
+    <view class="controls">
+      <button bindtap="undoRoute" disabled="{{routes.length === 0}}">↶ 撤销</button>
+      <button class="danger" bindtap="clearRoutes" disabled="{{routes.length === 0 && !selectedPlaceId}}">× 清空</button>
+      <button bindtap="resetView">◎ 重置</button>
+      <button wx:if="{{canEnterCity}}" bindtap="enterSelectedCity">城市详情</button>
+      <button wx:if="{{viewMode === 'city'}}" bindtap="exitCityView">← 返回全国</button>
+    </view>
+
+    <view class="summary">
+      <view>
+        <text>城市点</text>
+        <text class="summary-value">{{cityCount}}</text>
+      </view>
+      <view>
+        <text>路线段数</text>
+        <text class="summary-value">{{routes.length}}</text>
+      </view>
+      <view>
+        <text>总距离</text>
+        <text class="summary-value">{{totalDistanceText}}</text>
+      </view>
+      <view>
+        <text>总时长</text>
+        <text class="summary-value">{{totalDurationText}}</text>
+      </view>
+    </view>
+
+    <view class="route-heading">
+      <text>行程链路</text>
+      <text class="chain">{{chainLabel}}</text>
+    </view>
+    <view class="route-list">
+      <view wx:for="{{routes}}" wx:key="id" class="route-item">
+        <text class="segment">{{item.fromName}} → {{item.toName}}</text>
+        <text class="route-status">{{item.contextText}}</text>
+        <text class="meta">{{item.meta}}</text>
+      </view>
+      <text wx:if="{{!routes.length}}" class="empty">连续点击城市即可生成多城市路线。</text>
+    </view>
+  </view>
+</view>
