@@ -8,7 +8,7 @@
     <meta http-equiv="Expires" content="0" />
     <title>&#26053;&#34892;&#34892;&#31243;&#35268;&#21010;</title>
     <link rel="stylesheet" href="./vendor/leaflet/leaflet.css?v=1.9.4" />
-    <link rel="stylesheet" href="./styles.css?v=route-polish-1" />
+    <link rel="stylesheet" href="./styles.css?v=food-articles-3" />
   </head>
   <body>
     <main class="app-shell">
@@ -88,6 +88,15 @@
           </div>
         </section>
 
+        <section class="food-panel" aria-label="Food articles">
+          <div class="section-heading">
+            <h2>食行记</h2>
+            <span id="foodArticleCount">0 篇</span>
+          </div>
+          <div id="foodArticleList" class="food-article-list"></div>
+          <p id="foodEmptyState" class="empty-state">进入城市详情后，会显示本地抓取的食行记文章与图片。</p>
+        </section>
+
         <section class="route-list-wrap">
           <div class="section-heading">
             <h2>&#34892;&#31243;&#38142;&#36335;</h2>
@@ -115,6 +124,6 @@
     </main>
 
     <script src="./vendor/leaflet/leaflet.js?v=1.9.4"></script>
-    <script src="./app.js?v=route-polish-1"></script>
+    <script src="./app.js?v=food-articles-3"></script>
   </body>
 </html>

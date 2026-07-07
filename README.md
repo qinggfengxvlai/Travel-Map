@@ -125,3 +125,80 @@ miniprogram/pages/index/index.wxml
 miniprogram/pages/index/index.js
 miniprogram/pages/index/index.wxss
 ```
+
+## 批量抓取微信文章
+
+如果已经把微信公众号文章目录页保存成本地 HTML，可以使用脚本批量提取目录页里的文章链接，并抓取正文内容：
+
+```powershell
+python scripts\wechat_batch_fetch.py --input "555天图文快速链接.html" --out exports\wechat_articles
+```
+
+常用参数：
+
+```powershell
+# 只列出前 10 个文章链接，不抓取正文
+python scripts\wechat_batch_fetch.py --input "555天图文快速链接.html" --list-only --limit 10
+
+# 先试抓 5 篇
+python scripts\wechat_batch_fetch.py --input "555天图文快速链接.html" --out exports\wechat_articles_test --limit 5
+
+# 降低请求频率，减少被微信限流的概率
+python scripts\wechat_batch_fetch.py --input "555天图文快速链接.html" --out exports\wechat_articles --delay 2
+```
+
+脚本会为每篇文章生成：
+
+```text
+exports/wechat_articles/
+├── 001-文章标题-哈希.md
+├── 001-文章标题-哈希.json
+└── images/
+    └── 001-文章标题-哈希/
+        ├── 001.jpg
+        └── 002.jpg
+```
+
+默认会把文章图片下载到 `exports/wechat_articles/images/文章标题/`，并把 Markdown 里的图片链接改成本地相对路径。只想抓正文、不下载图片时可以加：
+
+```powershell
+python scripts\wechat_batch_fetch.py --input "555天图文快速链接.html" --out exports\wechat_articles --skip-images
+```
+
+微信页面可能会触发限流或反爬。如果批量抓取失败，可以调大 `--delay`，或者分批使用 `--limit` 抓取。
+
+抓取完成后，先把 Markdown 转成本地阅读页。直接在浏览器打开 `.md` 文件时，图片会显示成 `![](images/...)` 这种原始 Markdown；生成阅读页后，图片会以正常图文形式显示：
+
+```powershell
+python scripts\build_article_readers.py --input exports\wechat_articles --skip-pdf
+```
+
+如果需要 PDF，可以去掉 `--skip-pdf`。脚本会调用本机 Chrome 或 Edge 打印 PDF，文章较多时耗时会比较长：
+
+```powershell
+python scripts\build_article_readers.py --input exports\wechat_articles
+```
+
+生成结果会放在：
+
+```text
+exports/wechat_articles/
+├── readers/
+│   └── 001-文章标题-哈希.html
+└── pdfs/
+    └── 001-文章标题-哈希.pdf
+```
+
+最后生成地图使用的轻量索引：
+
+```powershell
+node scripts\build_wechat_food_index.js
+```
+
+该命令会读取 `exports/wechat_articles/*.json`，自动匹配城市/区县，生成：
+
+```text
+data/wechat-food-articles.json
+```
+
+地图会读取这个索引，在城市详情中显示“食行记”文章点、文章卡片和本地图文链接。索引会优先使用已经生成的 PDF；如果还没有 PDF，则自动使用 `readers/` 里的 HTML 阅读页。

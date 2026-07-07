@@ -393,6 +393,7 @@ const state = {
   activeStationCount: 0,
   activeSubwayLineCount: 0,
   activeSubwayStationCount: 0,
+  activeFoodArticleCount: 0,
   pendingCityClickTimer: null,
   routes: [],
   nextRouteId: 1,
@@ -418,6 +419,10 @@ const state = {
   metroNetworkPromise: null,
   passengerStationNames: null,
   passengerStationNamesPromise: null,
+  foodArticles: [],
+  foodArticleById: new Map(),
+  foodArticlesByCity: new Map(),
+  foodArticlesByPlace: new Map(),
   searchResults: [],
   featureCityIds: new WeakMap(),
   cities: [],
@@ -443,6 +448,9 @@ const totalDistance = document.querySelector("#totalDistance");
 const totalDuration = document.querySelector("#totalDuration");
 const chainLabel = document.querySelector("#chainLabel");
 const availableCityCount = document.querySelector("#availableCityCount");
+const foodArticleCount = document.querySelector("#foodArticleCount");
+const foodArticleList = document.querySelector("#foodArticleList");
+const foodEmptyState = document.querySelector("#foodEmptyState");
 const transportButtons = Array.from(document.querySelectorAll("[data-mode]"));
 const exitCityViewBtn = document.querySelector("#exitCityViewBtn");
 const mapBadgeLabel = document.querySelector(".map-badge span");
@@ -453,11 +461,21 @@ async function loadJson(path) {
   return response.json();
 }
 
+async function loadOptionalJson(path) {
+  try {
+    return await loadJson(path);
+  } catch (error) {
+    console.warn("optional data unavailable", path, error);
+    return null;
+  }
+}
+
 async function loadMapData() {
-  const [mapData, cityData, countyData] = await Promise.all([
+  const [mapData, cityData, countyData, foodData] = await Promise.all([
     loadJson("./data/china-prefectures.json"),
     loadJson("./data/china-cities.json"),
-    loadJson("./data/china-counties.json")
+    loadJson("./data/china-counties.json"),
+    loadOptionalJson("./data/wechat-food-articles.json")
   ]);
 
   const cities = cityData && cityData.cities ? cityData.cities : [];
@@ -492,6 +510,49 @@ async function loadMapData() {
   state.cityByKey = buildCityKeyMap(state.cities, state.hiddenMunicipalityChildren);
   state.cityByProvinceKey = buildCityProvinceKeyMap(state.cities, state.hiddenMunicipalityChildren);
   state.cityKeyEntries = Array.from(state.cityByKey.entries()).sort((a, b) => b[0].length - a[0].length);
+  hydrateFoodArticles(foodData);
+}
+
+function hydrateFoodArticles(foodData) {
+  const knownPlaces = state.placeById;
+  state.foodArticles = (foodData && Array.isArray(foodData.articles) ? foodData.articles : [])
+    .filter((article) => knownPlaces.has(article.placeId) && Number.isFinite(Number(article.lon)) && Number.isFinite(Number(article.lat)))
+    .map((article) => ({
+      ...article,
+      searchText: normalizeSearchText(`${article.title} ${article.description} ${article.cityName} ${article.countyName} ${(article.foods || []).join(" ")}`)
+    }))
+    .sort((a, b) => Number(a.day || 0) - Number(b.day || 0));
+
+  state.foodArticleById = new Map(state.foodArticles.map((article) => [article.id, article]));
+  state.foodArticlesByCity = groupArticlesBy("cityId");
+  state.foodArticlesByPlace = groupArticlesBy("placeId");
+  enrichPlaceSearchTextWithArticles();
+}
+
+function groupArticlesBy(field) {
+  const map = new Map();
+  state.foodArticles.forEach((article) => {
+    const key = article[field];
+    if (!key) return;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(article);
+  });
+  return map;
+}
+
+function enrichPlaceSearchTextWithArticles() {
+  const appendArticleText = (place) => {
+    const cityArticles = articlesForCity(place.id);
+    const placeArticles = articlesForPlace(place.id);
+    const articles = place.placeType === "county" ? placeArticles : cityArticles;
+    if (!articles.length) return;
+    const articleText = articles
+      .flatMap((article) => [article.title, article.description, ...(article.foods || [])])
+      .join(" ");
+    place.searchText = `${place.searchText} ${normalizeSearchText(articleText)}`;
+  };
+  state.cities.forEach(appendArticleText);
+  state.counties.forEach(appendArticleText);
 }
 
 function buildMunicipalityCountyEntries(children, displayCities) {
@@ -541,6 +602,8 @@ function initMap() {
   state.map.createPane("cityLabels");
   state.map.getPane("cityLabels").style.zIndex = 650;
   state.map.getPane("cityLabels").style.pointerEvents = "none";
+  state.map.createPane("foodMarkers");
+  state.map.getPane("foodMarkers").style.zIndex = 720;
   state.routeLayer = L.layerGroup().addTo(state.map);
   state.cityLayer = L.layerGroup().addTo(state.map);
   state.labelLayer = L.layerGroup([], { pane: "cityLabels" }).addTo(state.map);
@@ -729,11 +792,12 @@ function cityStyle(cityId) {
   const visited = new Set(state.routes.flatMap((route) => [route.from, route.to]));
   const isSelected = cityId === state.selectedCityId;
   const isVisited = visited.has(cityId);
+  const hasFoodArticles = articleCountForCity(cityId) > 0;
   return {
-    radius: isSelected ? 7 : isVisited ? 5 : 3.4,
+    radius: isSelected ? 7 : isVisited ? 5 : hasFoodArticles ? 4.3 : 3.4,
     color: isSelected ? "#e84d3d" : isVisited ? "#168f7d" : "#fffaf0",
     weight: isSelected ? 2.5 : 1.25,
-    fillColor: isSelected ? "#ffe7bd" : isVisited ? "#168f7d" : "#e84d3d",
+    fillColor: isSelected ? "#ffe7bd" : isVisited ? "#168f7d" : hasFoodArticles ? "#c46b2a" : "#e84d3d",
     fillOpacity: isSelected ? 1 : 0.92,
     opacity: 1
   };
@@ -784,11 +848,13 @@ function updateSearchResults() {
 }
 
 function searchResultHtml(item) {
+  const articleCount = articleCountForPlace(item.id) || articleCountForCity(item.searchType === "county" ? item.parentCityId : item.id);
+  const articleBadge = articleCount ? `<em>${articleCount} 篇食行记</em>` : "";
   if (item.searchType === "county") {
-    return `<strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.parentCityName)} · ${escapeHtml(item.province)} / ${escapeHtml(item.pinyin)}</span>`;
+    return `<strong>${escapeHtml(item.name)}${articleBadge}</strong><span>${escapeHtml(item.parentCityName)} · ${escapeHtml(item.province)} / ${escapeHtml(item.pinyin)}</span>`;
   }
 
-  return `<strong>${escapeHtml(item.name)}</strong><span>\u5e02\u7ea7\u884c\u653f\u533a · ${escapeHtml(item.province)} / ${escapeHtml(item.pinyin)}</span>`;
+  return `<strong>${escapeHtml(item.name)}${articleBadge}</strong><span>\u5e02\u7ea7\u884c\u653f\u533a · ${escapeHtml(item.province)} / ${escapeHtml(item.pinyin)}</span>`;
 }
 
 function scoreSearchResult(item, query) {
@@ -1020,13 +1086,13 @@ function renderPanel() {
 
   if (state.viewMode === "city") {
     const activeCity = cityById(state.activeCityViewId);
-    const detailCounts = activeCity ? cityDetailCounts(activeCity) : { subareas: 0, landmarks: 0, stations: 0, subwayStations: 0 };
+    const detailCounts = activeCity ? cityDetailCounts(activeCity) : { subareas: 0, landmarks: 0, stations: 0, subwayStations: 0, foodArticles: 0 };
     const subareaText = state.activeDistrictBoundaryCount
       ? `${state.activeDistrictBoundaryCount} \u4e2a\u4e0b\u8f96\u533a\u57df\u8fb9\u754c`
       : `${detailCounts.subareas} \u4e2a\u533a\u53bf\u70b9`;
     selectionTitle.textContent = activeCity ? `\u57ce\u5e02\u89c6\u56fe\uff1a${activeCity.name}` : "\u57ce\u5e02\u89c6\u56fe";
     selectionHint.textContent = activeCity
-      ? `\u5df2\u9690\u85cf\u4e2d\u56fd\u603b\u56fe\uff0c\u6b63\u5728\u663e\u793a ${subareaText}\u3001${detailCounts.landmarks} \u4e2a\u5730\u6807/\u666f\u70b9\u3001${state.activeStationCount} \u4e2a\u706b\u8f66\u7ad9\u4e0e ${state.activeSubwayLineCount} \u6761\u5730\u94c1\u7ebf\u8def/${state.activeSubwayStationCount} \u4e2a\u5730\u94c1\u7ad9\uff0c\u533a\u53bf\u8fb9\u754c\u53ef\u70b9\u51fb\u7eb3\u5165\u884c\u7a0b\u3002`
+      ? `\u5df2\u9690\u85cf\u4e2d\u56fd\u603b\u56fe\uff0c\u6b63\u5728\u663e\u793a ${subareaText}\u3001${detailCounts.landmarks} \u4e2a\u5730\u6807/\u666f\u70b9\u3001${state.activeStationCount} \u4e2a\u706b\u8f66\u7ad9\u4e0e ${state.activeSubwayLineCount} \u6761\u5730\u94c1\u7ebf\u8def/${state.activeSubwayStationCount} \u4e2a\u5730\u94c1\u7ad9\u3001${state.activeFoodArticleCount} \u7bc7\u98df\u884c\u8bb0\uff0c\u533a\u53bf\u8fb9\u754c\u53ef\u70b9\u51fb\u7eb3\u5165\u884c\u7a0b\u3002`
       : "\u53cc\u51fb\u57ce\u5e02\u53ef\u8fdb\u5165\u72ec\u7acb\u57ce\u5e02\u89c6\u56fe\u3002";
   } else if (selected) {
     selectionTitle.textContent = labels.fromCity(selected.name);
@@ -1060,8 +1126,8 @@ function renderPanel() {
   cityCount.textContent = String(state.cities.length);
   if (state.viewMode === "city") {
     const activeCity = cityById(state.activeCityViewId);
-    const detailCounts = activeCity ? cityDetailCounts(activeCity) : { subareas: 0, landmarks: 0, stations: 0, subwayStations: 0 };
-    availableCityCount.textContent = String(detailCounts.subareas + detailCounts.landmarks + state.activeStationCount + state.activeSubwayStationCount);
+    const detailCounts = activeCity ? cityDetailCounts(activeCity) : { subareas: 0, landmarks: 0, stations: 0, subwayStations: 0, foodArticles: 0 };
+    availableCityCount.textContent = String(detailCounts.subareas + detailCounts.landmarks + state.activeStationCount + state.activeSubwayStationCount + state.activeFoodArticleCount);
     if (mapBadgeLabel) mapBadgeLabel.textContent = "\u57ce\u5e02\u5185\u70b9\u4f4d";
   } else {
     availableCityCount.textContent = String(state.cities.length);
@@ -1071,6 +1137,7 @@ function renderPanel() {
   updateCityStyles();
   updateTotals();
   chainLabel.textContent = buildChainLabel();
+  renderFoodPanel();
 }
 
 function updateTotals() {
@@ -1369,6 +1436,8 @@ async function renderCityDetail(city) {
       })
       .addTo(state.cityDetailLayer);
   });
+
+  renderFoodArticleMarkers(city, detailBounds);
 
   if (!detailBounds.isValid()) return;
   state.map.fitBounds(detailBounds.pad(0.18), {
@@ -2041,8 +2110,132 @@ function cityDetailCounts(city) {
     subareas: citySubareas(city).length,
     landmarks: state.activeLandmarkCount || cityLandmarks(city).length,
     stations: state.activeStationCount,
-    subwayStations: state.activeSubwayStationCount
+    subwayStations: state.activeSubwayStationCount,
+    foodArticles: articleCountForCity(city.id)
   };
+}
+
+function articlesForCity(cityId) {
+  return state.foodArticlesByCity.get(cityId) || [];
+}
+
+function articlesForPlace(placeId) {
+  return state.foodArticlesByPlace.get(placeId) || [];
+}
+
+function articleCountForCity(cityId) {
+  return articlesForCity(cityId).length;
+}
+
+function articleCountForPlace(placeId) {
+  return articlesForPlace(placeId).length;
+}
+
+function selectedFoodArticles() {
+  const selected = state.selectedCityId ? placeById(state.selectedCityId) : null;
+  if (selected && selected.placeType === "county") return articlesForPlace(selected.id);
+  if (selected && selected.placeType === "city") return articlesForCity(selected.id);
+  if (state.viewMode === "city" && state.activeCityViewId) return articlesForCity(state.activeCityViewId);
+  return [];
+}
+
+function renderFoodPanel() {
+  if (!foodArticleList || !foodArticleCount || !foodEmptyState) return;
+  const articles = selectedFoodArticles();
+  foodArticleCount.textContent = `${articles.length} 篇`;
+  foodArticleList.replaceChildren();
+  foodEmptyState.hidden = articles.length > 0;
+
+  articles.slice(0, 8).forEach((article) => {
+    const card = document.createElement("article");
+    card.className = "food-card";
+    const readerPath = articleReaderPath(article);
+    const cover = article.coverImage
+      ? `<img src="${escapeHtml(article.coverImage)}" alt="" loading="lazy" />`
+      : `<span class="food-card-placeholder">食</span>`;
+    card.innerHTML = `
+      <a class="food-card-media" href="${escapeHtml(readerPath)}" target="_blank" rel="noopener">${cover}</a>
+      <div class="food-card-body">
+        <p>${article.day ? `第 ${article.day} 天` : "食行记"} · ${escapeHtml(article.locationText || article.cityName)}</p>
+        <h3><a href="${escapeHtml(readerPath)}" target="_blank" rel="noopener">${escapeHtml(article.title)}</a></h3>
+        <span>${escapeHtml((article.foods || []).slice(0, 5).join("、") || article.description)}</span>
+      </div>
+    `;
+    foodArticleList.append(card);
+  });
+}
+
+function renderFoodArticleMarkers(city, detailBounds) {
+  const articles = articlesForCity(city.id);
+  state.activeFoodArticleCount = articles.length;
+  if (!articles.length) return;
+
+  const placeOffsets = new Map();
+  articles.forEach((article) => {
+    const offsetIndex = placeOffsets.get(article.placeId) || 0;
+    placeOffsets.set(article.placeId, offsetIndex + 1);
+    const offset = foodMarkerOffset(offsetIndex);
+    const lat = Number(article.lat) + offset.lat;
+    const lon = Number(article.lon) + offset.lon;
+    detailBounds.extend([lat, lon]);
+    L.marker([lat, lon], {
+      pane: "foodMarkers",
+      icon: L.divIcon({
+        className: "",
+        html: `<span class="food-marker"><span>食</span></span>`,
+        iconSize: [22, 22],
+        iconAnchor: [11, 11]
+      })
+    })
+      .bindTooltip(`${article.title} / 食行记`, {
+        className: "city-tooltip",
+        direction: "top",
+        offset: [0, -8],
+        opacity: 1,
+        sticky: true
+      })
+      .bindPopup(foodArticlePopupHtml(article), {
+        className: "food-popup-shell",
+        maxWidth: 320,
+        minWidth: 250
+      })
+      .addTo(state.cityDetailLayer);
+  });
+}
+
+function foodMarkerOffset(index) {
+  if (!index) return { lat: 0, lon: 0 };
+  const angle = index * 1.9;
+  const radius = Math.min(0.035, 0.006 + index * 0.0025);
+  return {
+    lat: Math.sin(angle) * radius,
+    lon: Math.cos(angle) * radius
+  };
+}
+
+function foodArticlePopupHtml(article) {
+  const readerPath = articleReaderPath(article);
+  const cover = article.coverImage
+    ? `<img class="food-popup-cover" src="${escapeHtml(article.coverImage)}" alt="" loading="lazy" />`
+    : "";
+  const foods = (article.foods || []).slice(0, 8).map((food) => `<span>${escapeHtml(food)}</span>`).join("");
+  return `
+    <article class="food-popup">
+      ${cover}
+      <p class="food-popup-kicker">${article.day ? `第 ${article.day} 天` : "食行记"} · ${escapeHtml(article.locationText || article.cityName)}</p>
+      <h3>${escapeHtml(article.title)}</h3>
+      <p>${escapeHtml(article.description || "")}</p>
+      <div class="food-tags">${foods}</div>
+      <div class="food-popup-actions">
+        <a href="${escapeHtml(readerPath)}" target="_blank" rel="noopener">${article.pdfPath ? "打开 PDF" : "打开图文页"}</a>
+        ${article.url ? `<a href="${escapeHtml(article.url)}" target="_blank" rel="noopener">原文</a>` : ""}
+      </div>
+    </article>
+  `;
+}
+
+function articleReaderPath(article) {
+  return article.readerPath || article.pdfPath || article.htmlPath || article.markdownPath;
 }
 
 function transportProfile(mode = state.transportMode) {

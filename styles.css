@@ -185,7 +185,20 @@ h1 {
 }
 
 .search-result strong {
+  display: inline-flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
   font-size: 15px;
+}
+
+.search-result em {
+  padding: 2px 6px;
+  border: 1px solid rgba(196, 107, 42, 0.28);
+  background: rgba(196, 107, 42, 0.1);
+  color: #9a4b30;
+  font: 800 11px/1.1 ui-monospace, "SFMono-Regular", Consolas, monospace;
+  font-style: normal;
 }
 
 .search-result span {
@@ -238,6 +251,92 @@ h1 {
   border-color: var(--green);
   background: var(--green);
   box-shadow: inset 0 0 0 1px rgba(255, 250, 240, 0.22);
+}
+
+.food-panel {
+  display: grid;
+  gap: 10px;
+}
+
+.food-article-list {
+  display: grid;
+  gap: 8px;
+  max-height: 360px;
+  overflow: auto;
+}
+
+.food-card {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr);
+  gap: 10px;
+  padding: 8px;
+  border: 1px solid rgba(92, 74, 47, 0.18);
+  background: rgba(255, 255, 255, 0.42);
+}
+
+.food-card-media {
+  width: 72px;
+  aspect-ratio: 1;
+  display: block;
+  overflow: hidden;
+  border: 1px solid rgba(35, 79, 68, 0.14);
+  background: #f3ead8;
+  text-decoration: none;
+}
+
+.food-card-media img {
+  width: 100%;
+  height: 100%;
+  display: block;
+  object-fit: cover;
+}
+
+.food-card-placeholder {
+  width: 100%;
+  height: 100%;
+  display: grid;
+  place-items: center;
+  color: #9a4b30;
+  font-size: 26px;
+  font-weight: 900;
+}
+
+.food-card-body {
+  min-width: 0;
+  display: grid;
+  align-content: start;
+  gap: 4px;
+}
+
+.food-card-body p,
+.food-card-body h3,
+.food-card-body span {
+  margin: 0;
+}
+
+.food-card-body p {
+  color: #9a4b30;
+  font: 800 11px/1.2 ui-monospace, "SFMono-Regular", Consolas, monospace;
+}
+
+.food-card-body h3 {
+  font-size: 14px;
+  line-height: 1.28;
+}
+
+.food-card-body a {
+  color: var(--ink);
+  text-decoration: none;
+}
+
+.food-card-body a:hover {
+  color: var(--green);
+}
+
+.food-card-body span {
+  color: var(--muted);
+  font-size: 12px;
+  line-height: 1.45;
 }
 
 .icon-button,
@@ -541,6 +640,73 @@ h1 {
   text-decoration: none;
 }
 
+.food-popup-shell .leaflet-popup-content-wrapper {
+  border: 1px solid rgba(154, 75, 48, 0.22);
+  border-radius: 8px;
+  background: rgba(255, 250, 240, 0.98);
+  box-shadow: 0 14px 32px rgba(27, 42, 38, 0.18);
+}
+
+.food-popup-shell .leaflet-popup-content {
+  margin: 14px 16px;
+}
+
+.food-popup-shell .leaflet-popup-tip {
+  background: rgba(255, 250, 240, 0.98);
+}
+
+.food-popup-cover {
+  width: 100%;
+  aspect-ratio: 16 / 9;
+  display: block;
+  margin-bottom: 10px;
+  object-fit: cover;
+  border: 1px solid rgba(92, 74, 47, 0.16);
+}
+
+.food-popup h3 {
+  margin: 2px 0 8px;
+  color: #20352f;
+  font: 800 17px/1.25 Georgia, "Noto Serif SC", serif;
+}
+
+.food-popup p {
+  margin: 0;
+  color: #3c4b43;
+  font-size: 13px;
+  line-height: 1.55;
+}
+
+.food-popup-kicker {
+  color: #9a4b30 !important;
+  font-size: 11px !important;
+  font-weight: 900;
+}
+
+.food-tags,
+.food-popup-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.food-tags span,
+.food-popup-actions a {
+  min-height: 22px;
+  padding: 3px 7px;
+  border: 1px solid rgba(196, 107, 42, 0.2);
+  background: rgba(255, 255, 255, 0.56);
+  color: #7a4b2c;
+  font-size: 11px;
+  font-weight: 800;
+}
+
+.food-popup-actions a {
+  color: var(--green);
+  text-decoration: none;
+}
+
 .city-name-marker {
   pointer-events: none;
   white-space: nowrap;
@@ -717,6 +883,19 @@ h1 {
 .landmark-marker.building {
   background: var(--red);
   color: #fffaf0;
+}
+
+.food-marker {
+  width: 22px;
+  height: 22px;
+  display: grid;
+  place-items: center;
+  border: 2px solid #fffaf0;
+  border-radius: 50%;
+  background: #c46b2a;
+  color: #fffaf0;
+  box-shadow: 0 8px 16px rgba(35, 47, 41, 0.24);
+  font: 900 13px/1 "Noto Serif SC", Georgia, serif;
 }
 
 .station-marker {
