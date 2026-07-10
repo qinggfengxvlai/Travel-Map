@@ -2735,8 +2735,9 @@ function renderFoodPanel() {
     const card = document.createElement("article");
     card.className = "food-card";
     const readerPath = articleReaderPath(article);
-    const cover = article.coverImage
-      ? `<img src="${escapeHtml(article.coverImage)}" alt="" loading="lazy" />`
+    const coverImage = articleCoverImage(article);
+    const cover = coverImage
+      ? `<img src="${escapeHtml(coverImage)}" alt="" loading="lazy" />`
       : `<span class="food-card-placeholder">食</span>`;
     card.innerHTML = `
       <a class="food-card-media" href="${escapeHtml(readerPath)}" target="_blank" rel="noopener">${cover}</a>
@@ -2801,8 +2802,9 @@ function foodMarkerOffset(index) {
 
 function foodArticlePopupHtml(article) {
   const readerPath = articleReaderPath(article);
-  const cover = article.coverImage
-    ? `<img class="food-popup-cover" src="${escapeHtml(article.coverImage)}" alt="" loading="lazy" />`
+  const coverImage = articleCoverImage(article);
+  const cover = coverImage
+    ? `<img class="food-popup-cover" src="${escapeHtml(coverImage)}" alt="" loading="lazy" />`
     : "";
   const foods = (article.foods || []).slice(0, 8).map((food) => `<span>${escapeHtml(food)}</span>`).join("");
   return `
@@ -2821,7 +2823,16 @@ function foodArticlePopupHtml(article) {
 }
 
 function articleReaderPath(article) {
-  return article.readerPath || article.pdfPath || article.htmlPath || article.markdownPath;
+  if (!shouldUseLocalArticleAssets() && article.url) return article.url;
+  return article.readerPath || article.pdfPath || article.htmlPath || article.markdownPath || article.url || "#";
+}
+
+function articleCoverImage(article) {
+  return shouldUseLocalArticleAssets() ? article.coverImage : "";
+}
+
+function shouldUseLocalArticleAssets() {
+  return ["", "localhost", "127.0.0.1"].includes(window.location.hostname);
 }
 
 function transportProfile(mode = state.transportMode) {
