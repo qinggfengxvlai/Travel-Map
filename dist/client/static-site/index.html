@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta http-equiv="Cache-Control" content="no-store" />
+    <meta http-equiv="Pragma" content="no-cache" />
+    <meta http-equiv="Expires" content="0" />
+    <title>&#26053;&#34892;&#34892;&#31243;&#35268;&#21010;</title>
+    <link rel="stylesheet" href="./vendor/leaflet/leaflet.css?v=1.9.4" />
+    <link rel="stylesheet" href="./styles.css?v=itinerary-guide-4" />
+  </head>
+  <body>
+    <main class="app-shell">
+      <div class="mobile-view-toggle" aria-label="Mobile view">
+        <button class="active" data-mobile-view="plan" type="button">&#34892;&#31243;</button>
+        <button data-mobile-view="map" type="button">&#22320;&#22270;</button>
+      </div>
+
+      <aside class="trip-panel" aria-label="Trip planning panel">
+        <div class="brand">
+          <span class="brand-mark"></span>
+          <div>
+            <p class="eyebrow">Route Studio</p>
+            <h1>&#26053;&#34892;&#34892;&#31243;&#35268;&#21010;</h1>
+          </div>
+        </div>
+
+        <section class="status-card" aria-live="polite">
+          <p class="label">&#24403;&#21069;&#25805;&#20316;</p>
+          <h2 id="selectionTitle">&#36873;&#25321;&#20986;&#21457;&#22478;&#24066;</h2>
+          <p id="selectionHint">&#28857;&#20987;&#22320;&#22270;&#19978;&#30340;&#20219;&#24847;&#22278;&#24418;&#22478;&#24066;&#22270;&#26631;&#20316;&#20026;&#36215;&#28857;&#12290;</p>
+        </section>
+
+        <section class="search-panel" aria-label="City search">
+          <label class="label" for="citySearch">&#25628;&#32034;&#22478;&#24066;</label>
+          <div class="search-box">
+            <input id="citySearch" type="search" autocomplete="off" placeholder="&#36755;&#20837;&#22478;&#24066;&#12289;&#21306;&#21439;&#12289;&#30465;&#20221;&#25110;&#25340;&#38899;" />
+            <button id="clearSearchBtn" class="search-clear" type="button" title="Clear search">&times;</button>
+          </div>
+          <div id="searchResults" class="search-results" role="listbox"></div>
+        </section>
+
+        <section class="transport-panel" aria-label="Transport mode">
+          <p class="label">&#20132;&#36890;&#24037;&#20855;</p>
+          <div class="transport-toggle" role="radiogroup" aria-label="Transport mode">
+            <button class="transport-option active" data-mode="highspeed" type="button" role="radio" aria-checked="true">
+              <span aria-hidden="true">&#9889;</span>
+              <span>&#39640;&#38081;</span>
+            </button>
+            <button class="transport-option" data-mode="train" type="button" role="radio" aria-checked="false">
+              <span aria-hidden="true">&#9679;</span>
+              <span>&#28779;&#36710;</span>
+            </button>
+          </div>
+        </section>
+
+        <section class="pace-panel" aria-label="Trip pace">
+          <p class="label">&#34892;&#31243;&#24378;&#24230;</p>
+          <div class="pace-toggle" role="radiogroup" aria-label="Trip pace">
+            <button class="pace-option" data-pace="relaxed" type="button" role="radio" aria-checked="false">
+              <span>&#36731;&#26494;</span>
+              <small>3h</small>
+            </button>
+            <button class="pace-option active" data-pace="standard" type="button" role="radio" aria-checked="true">
+              <span>&#26631;&#20934;</span>
+              <small>4h</small>
+            </button>
+            <button class="pace-option" data-pace="compact" type="button" role="radio" aria-checked="false">
+              <span>&#32039;&#20945;</span>
+              <small>6h</small>
+            </button>
+          </div>
+        </section>
+
+        <section class="controls" aria-label="Map controls">
+          <button id="undoBtn" class="icon-button" title="Undo last route" type="button" disabled>
+            <span aria-hidden="true">&#8630;</span>
+            <span>&#25764;&#38144;</span>
+          </button>
+          <button id="clearBtn" class="icon-button danger" title="Clear all routes" type="button" disabled>
+            <span aria-hidden="true">&times;</span>
+            <span>&#28165;&#31354;</span>
+          </button>
+          <button id="resetViewBtn" class="icon-button" title="Reset map view" type="button">
+            <span aria-hidden="true">&#9678;</span>
+            <span>&#37325;&#32622;</span>
+          </button>
+          <button id="saveTripBtn" class="icon-button" title="Save trip locally" type="button" disabled>
+            <span aria-hidden="true">&#9673;</span>
+            <span>&#20445;&#23384;</span>
+          </button>
+          <button id="shareTripBtn" class="icon-button" title="Copy share link" type="button" disabled>
+            <span aria-hidden="true">&#8599;</span>
+            <span>&#22797;&#21046;&#38142;&#25509;</span>
+          </button>
+          <button id="exportBtn" class="icon-button" title="Export travel guide" type="button" disabled>
+            <span aria-hidden="true">&#8681;</span>
+            <span>&#23548;&#20986;&#25915;&#30053;</span>
+          </button>
+        </section>
+        <p id="tripArchiveStatus" class="archive-status" aria-live="polite">&#36335;&#32447;&#20250;&#33258;&#21160;&#20445;&#23384;&#21040;&#26412;&#26426;&#12290;</p>
+
+        <section class="route-summary" aria-label="Route summary">
+          <div class="summary-row">
+            <span>&#22478;&#24066;&#28857;</span>
+            <strong id="cityCount">0</strong>
+          </div>
+          <div class="summary-row">
+            <span>&#36335;&#32447;&#27573;&#25968;</span>
+            <strong id="routeCount">0</strong>
+          </div>
+          <div class="summary-row">
+            <span>&#24635;&#36317;&#31163;</span>
+            <strong id="totalDistance">&#24453;&#35745;&#31639;</strong>
+          </div>
+          <div class="summary-row">
+            <span>&#24635;&#26102;&#38271;</span>
+            <strong id="totalDuration">&#24453;&#35745;&#31639;</strong>
+          </div>
+        </section>
+
+        <section class="itinerary-panel" aria-label="Time plan">
+          <div class="section-heading">
+            <h2>&#26102;&#38388;&#35268;&#21010;</h2>
+            <span id="itineraryMeta">&#24453;&#29983;&#25104;</span>
+          </div>
+          <div id="tripHealth" class="trip-health" hidden></div>
+          <ol id="itineraryList" class="itinerary-list"></ol>
+          <p id="itineraryEmptyState" class="empty-state">&#36873;&#25321;&#36215;&#28857;&#21518;&#20250;&#29983;&#25104;&#31532; 1 &#22825;&#34892;&#31243;&#65307;&#32487;&#32493;&#36873;&#25321;&#22478;&#24066;&#21518;&#65292;&#20250;&#25353;&#27599;&#26085;&#36328;&#22478;&#26102;&#38271;&#33258;&#21160;&#20998;&#37197;&#21040;&#27599;&#22825;&#12290;</p>
+        </section>
+
+        <section class="food-panel" aria-label="Food articles">
+          <div class="section-heading">
+            <h2>食行记</h2>
+            <span id="foodArticleCount">0 篇</span>
+          </div>
+          <div id="foodArticleList" class="food-article-list"></div>
+          <p id="foodEmptyState" class="empty-state">进入城市详情后，会显示本地抓取的食行记文章与图片。</p>
+        </section>
+
+        <section class="route-list-wrap">
+          <div class="section-heading">
+            <h2>&#34892;&#31243;&#38142;&#36335;</h2>
+            <span id="chainLabel">&#23578;&#26410;&#24320;&#22987;</span>
+          </div>
+          <ol id="routeList" class="route-list"></ol>
+          <p id="emptyState" class="empty-state">&#36830;&#32493;&#28857;&#20987;&#22478;&#24066;&#21363;&#21487;&#29983;&#25104;&#22810;&#22478;&#24066;&#36335;&#32447;&#65292;&#20363;&#22914;&#65306;&#21271;&#20140; &rarr; &#37073;&#24030; &rarr; &#27494;&#27721; &rarr; &#24191;&#24030;&#12290;</p>
+        </section>
+      </aside>
+
+      <section class="map-stage" aria-label="Interactive travel map">
+        <div class="map-toolbar">
+          <button id="exitCityViewBtn" class="map-action" type="button" hidden>
+            <span aria-hidden="true">&#8592;</span>
+            <span>&#36820;&#22238;&#20013;&#22269;&#22320;&#22270;</span>
+          </button>
+          <div class="map-badge" aria-live="polite">
+            <strong id="availableCityCount">0</strong>
+            <span>&#21487;&#28857;&#20987;&#22478;&#24066;</span>
+          </div>
+        </div>
+
+        <div id="travelMap" class="leaflet-map" role="application" aria-label="&#21487;&#20132;&#20114;&#20013;&#22269;&#26053;&#34892;&#22320;&#22270;"></div>
+      </section>
+    </main>
+
+    <script src="./vendor/leaflet/leaflet.js?v=1.9.4"></script>
+    <script src="./app.js?v=itinerary-guide-4"></script>
+  </body>
+</html>

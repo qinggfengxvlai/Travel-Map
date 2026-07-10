@@ -2,3 +2,8 @@
 __pycache__/
 *.pyc
 .openai/*.tgz
+node_modules/
+.next/
+.wrangler/
+.env
+.env.*
