@@ -1,0 +1,9 @@
+{
+  "name": "travel-map-guide",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "node -e \"import('node:fs').then(({ accessSync }) => accessSync('dist/server/index.js'))\""
+  }
+}
