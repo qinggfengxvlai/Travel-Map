@@ -381,13 +381,13 @@ test("returns the original plan for semantic item and lodging no-ops", () => {
 test("copies, removes and moves items without losing their IDs", () => {
   const plan = createTripPlan({ placeIds: ["beijing"], idFactory: ids() });
   plan.days[0].items = [
-    { id: "item-1", type: "activity", title: "一" },
-    { id: "item-2", type: "activity", title: "二" }
+    { id: "item-1", type: "activity", placeId: "beijing", title: "一" },
+    { id: "item-2", type: "activity", placeId: "beijing", title: "二" }
   ];
   plan.days.push({
     id: "day-2",
-    cityEntries: [],
-    overnightPlaceId: null,
+    cityEntries: [{ id: "city-entry-day-2", visitId: "visit-day-2", placeId: "beijing" }],
+    overnightPlaceId: "beijing",
     items: [],
     lodging: null,
     manuallyEdited: false
@@ -433,6 +433,172 @@ test("copies, removes and moves items without losing their IDs", () => {
   assert.equal(removed.requiresConfirmation, false);
   assert.deepEqual(removed.plan.days[0].items.map((item) => item.id), ["item-2"]);
   assert.equal(movedAcrossDays.plan.days[0].items.some((item) => item.id === "item-1"), true);
+});
+
+test("rejects item moves that would break day and place associations atomically", () => {
+  const plan = createTripPlan({ placeIds: ["beijing"], idFactory: ids() });
+  plan.days[0].items = [{
+    id: "beijing-activity",
+    type: "activity",
+    placeId: "beijing",
+    title: "Forbidden move"
+  }];
+  plan.days.push({
+    id: "day-shanghai",
+    cityEntries: [{ id: "shanghai-entry", visitId: "shanghai-visit", placeId: "shanghai" }],
+    overnightPlaceId: "shanghai",
+    items: [],
+    lodging: null,
+    manuallyEdited: false
+  });
+  const before = structuredClone(plan);
+
+  const result = applyTripCommand(plan, {
+    type: "move-item",
+    itemId: "beijing-activity",
+    targetDayId: "day-shanghai",
+    targetIndex: 0
+  });
+
+  assert.equal(result.changed, false);
+  assert.equal(result.requiresConfirmation, false);
+  assert.equal(result.blockedReason, "item-place-mismatch");
+  assert.strictEqual(result.plan, plan);
+  assert.deepEqual(plan, before);
+});
+
+test("allows overnight transport only when its destination is on the same or following day", () => {
+  const plan = createTripPlan({ placeIds: ["a", "b"], idFactory: ids() });
+  plan.days[0].items = [{
+    id: "overnight-a-b",
+    type: "transport",
+    fromPlaceId: "a",
+    toPlaceId: "b",
+    endDayOffset: 1
+  }, {
+    id: "same-day-a-b",
+    type: "transport",
+    fromPlaceId: "a",
+    toPlaceId: "b",
+    endDayOffset: 0
+  }];
+  plan.days.push({
+    id: "day-a",
+    cityEntries: [{ id: "entry-a", visitId: "visit-a", placeId: "a" }],
+    overnightPlaceId: "a",
+    items: [],
+    lodging: null,
+    manuallyEdited: false
+  });
+  plan.days.push({
+    id: "day-b",
+    cityEntries: [{ id: "entry-b", visitId: "visit-b", placeId: "b" }],
+    overnightPlaceId: "b",
+    items: [],
+    lodging: null,
+    manuallyEdited: false
+  }, {
+    id: "day-c",
+    cityEntries: [{ id: "entry-c", visitId: "visit-c", placeId: "c" }],
+    overnightPlaceId: "c",
+    items: [],
+    lodging: null,
+    manuallyEdited: false
+  });
+
+  const valid = applyTripCommand(plan, {
+    type: "move-item",
+    itemId: "overnight-a-b",
+    targetDayId: "day-a",
+    targetIndex: 0
+  });
+  assert.equal(valid.changed, true);
+  assert.equal(valid.blockedReason, undefined);
+
+  const sameDayInvalid = applyTripCommand(plan, {
+    type: "move-item",
+    itemId: "same-day-a-b",
+    targetDayId: "day-a",
+    targetIndex: 0
+  });
+  assert.equal(sameDayInvalid.changed, false);
+  assert.equal(sameDayInvalid.blockedReason, "item-place-mismatch");
+
+  const invalid = applyTripCommand(plan, {
+    type: "move-item",
+    itemId: "overnight-a-b",
+    targetDayId: "day-c",
+    targetIndex: 0
+  });
+  assert.equal(invalid.changed, false);
+  assert.equal(invalid.blockedReason, "item-place-mismatch");
+});
+
+test("confirms and cleans related content before moving the final city occurrence", () => {
+  const plan = {
+    version: 2,
+    id: "trip-city-move",
+    name: "Move cleanup",
+    startDate: null,
+    pace: "standard",
+    savedAt: "2026-07-14T00:00:00.000Z",
+    days: [{
+      id: "day-before",
+      cityEntries: [{ id: "entry-x", visitId: "visit-x", placeId: "x" }],
+      overnightPlaceId: "x",
+      items: [{
+        id: "overnight-arrival",
+        type: "transport",
+        fromPlaceId: "x",
+        toPlaceId: "a",
+        endDayOffset: 1
+      }],
+      lodging: null,
+      manuallyEdited: false
+    }, {
+      id: "day-source",
+      cityEntries: [
+        { id: "entry-a", visitId: "visit-a", placeId: "a" },
+        { id: "entry-b", visitId: "visit-b", placeId: "b" }
+      ],
+      overnightPlaceId: "a",
+      items: [
+        { id: "activity-a", type: "activity", placeId: "a", title: "Remove" },
+        { id: "activity-b", type: "activity", placeId: "b", title: "Keep" }
+      ],
+      lodging: { placeId: "a", name: "Source lodging" },
+      manuallyEdited: false
+    }, {
+      id: "day-target",
+      cityEntries: [{ id: "entry-c", visitId: "visit-c", placeId: "c" }],
+      overnightPlaceId: "c",
+      items: [],
+      lodging: { placeId: "c", name: "Target lodging" },
+      manuallyEdited: false
+    }]
+  };
+  const before = structuredClone(plan);
+  const command = { type: "move-city", entryId: "entry-a", targetDayId: "day-target", targetIndex: 1 };
+
+  const confirmation = applyTripCommand(plan, command);
+  assert.equal(confirmation.requiresConfirmation, true);
+  assert.equal(confirmation.changed, false);
+  assert.equal(confirmation.confirmationReason, "cleanup-associated-content");
+  assert.deepEqual(confirmation.affectedDayIds, ["day-before", "day-source"]);
+  assert.strictEqual(confirmation.plan, plan);
+  assert.deepEqual(plan, before);
+
+  const moved = applyTripCommand(plan, command, { force: true });
+  assert.equal(moved.requiresConfirmation, false);
+  assert.equal(moved.changed, true);
+  assert.deepEqual(moved.plan.days[0].items, []);
+  assert.deepEqual(moved.plan.days[1].cityEntries.map((entry) => entry.placeId), ["b"]);
+  assert.deepEqual(moved.plan.days[1].items.map((item) => item.id), ["activity-b"]);
+  assert.equal(moved.plan.days[1].lodging, null);
+  assert.equal(moved.plan.days[1].overnightPlaceId, "b");
+  assert.deepEqual(moved.plan.days[2].cityEntries.map((entry) => entry.placeId), ["c", "a"]);
+  assert.deepEqual(moved.plan.days[2].lodging, { placeId: "c", name: "Target lodging" });
+  assert.deepEqual(plan, before);
 });
 
 test("confirms and consistently cleans a city with related content", () => {
@@ -673,6 +839,30 @@ test("updates only explicit metadata and can clear the start date", () => {
   });
   assert.equal(noOp.changed, false);
   assert.equal(noOp.plan, direct.plan);
+});
+
+test("resolves plan pace consistently across compact edits and undo", async () => {
+  const tripPlanModule = await import("../public/static-site/trip-plan.js");
+  assert.equal(typeof tripPlanModule.resolveTripPace, "function");
+  const standardPlan = createTripPlan({ placeIds: ["beijing"], pace: "standard", idFactory: ids() });
+  const compactResult = applyTripCommand(standardPlan, {
+    type: "update-metadata",
+    patch: { pace: "compact" }
+  });
+
+  let statePace = tripPlanModule.resolveTripPace(compactResult.plan, "standard");
+  assert.equal(statePace, "compact");
+  statePace = tripPlanModule.resolveTripPace(standardPlan, statePace);
+  assert.equal(statePace, "standard");
+
+  const compactAgain = applyTripCommand(standardPlan, {
+    type: "update-metadata",
+    patch: { pace: "compact" }
+  });
+  assert.equal(compactAgain.changed, true);
+  assert.equal(tripPlanModule.resolveTripPace(compactAgain.plan, statePace), "compact");
+  assert.equal(tripPlanModule.resolveTripPace({ pace: "unsupported" }, "standard"), "standard");
+  assert.equal(tripPlanModule.resolveTripPace(null, "compact"), "compact");
 });
 
 test("parses only valid HH:mm values", () => {

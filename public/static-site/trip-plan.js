@@ -99,6 +99,28 @@ export function routePlaceIds(plan) {
   return flattened.filter((placeId, index) => index === 0 || flattened[index - 1] !== placeId);
 }
 
+export function resolveTripPace(plan, fallback = "standard") {
+  const safeFallback = VALID_TRIP_PACES.has(fallback) ? fallback : "standard";
+  return VALID_TRIP_PACES.has(plan?.pace) ? plan.pace : safeFallback;
+}
+
+function dayHasPlace(day, placeId) {
+  return typeof placeId === "string" &&
+    Array.isArray(day?.cityEntries) &&
+    day.cityEntries.some((entry) => entry?.placeId === placeId);
+}
+
+export function canMoveTripItemToDay(plan, item, targetDayId) {
+  if (!Array.isArray(plan?.days) || !item || typeof item !== "object" || Array.isArray(item)) return false;
+  const targetDayIndex = plan.days.findIndex((day) => day?.id === targetDayId);
+  if (targetDayIndex < 0) return false;
+  const targetDay = plan.days[targetDayIndex];
+  if (item.type === "activity") return dayHasPlace(targetDay, item.placeId);
+  if (item.type !== "transport" || !dayHasPlace(targetDay, item.fromPlaceId)) return false;
+  if (dayHasPlace(targetDay, item.toPlaceId)) return true;
+  return Number(item.endDayOffset) === 1 && dayHasPlace(plan.days[targetDayIndex + 1], item.toPlaceId);
+}
+
 function ensureValidOvernightPlace(day) {
   if (!day.cityEntries.some((entry) => entry.placeId === day.overnightPlaceId)) {
     day.overnightPlaceId = day.cityEntries.at(-1)?.placeId ?? null;
@@ -819,6 +841,15 @@ export function applyTripCommand(plan, command, { idFactory = defaultIdFactory, 
     const targetDay = next.days.find((day) => day.id === command.targetDayId);
     if (!source || !targetDay) return { plan, requiresConfirmation: false, changed: false };
     const sourceDay = next.days[source.dayIndex];
+    const item = sourceDay.items[source.itemIndex];
+    if (!canMoveTripItemToDay(next, item, targetDay.id)) {
+      return {
+        plan,
+        requiresConfirmation: false,
+        changed: false,
+        blockedReason: "item-place-mismatch"
+      };
+    }
     if (sourceDay === targetDay) {
       const reordered = [...sourceDay.items];
       const [candidate] = reordered.splice(source.itemIndex, 1);
@@ -828,7 +859,7 @@ export function applyTripCommand(plan, command, { idFactory = defaultIdFactory, 
         return { plan, requiresConfirmation: false, changed: false };
       }
     }
-    const [item] = sourceDay.items.splice(source.itemIndex, 1);
+    sourceDay.items.splice(source.itemIndex, 1);
     const targetIndex = safeInsertionIndex(command.targetIndex, targetDay.items.length);
     targetDay.items.splice(targetIndex, 0, item);
     sourceDay.manuallyEdited = true;
@@ -940,10 +971,79 @@ export function applyTripCommand(plan, command, { idFactory = defaultIdFactory, 
     const targetDay = next.days.find((day) => day.id === command.targetDayId);
     if (!source || !targetDay) return { plan, requiresConfirmation: false, changed: false };
     const sourceDay = next.days[source.dayIndex];
-    const [entry] = sourceDay.cityEntries.splice(source.entryIndex, 1);
-    targetDay.cityEntries.splice(command.targetIndex ?? targetDay.cityEntries.length, 0, { ...entry, manuallyPlaced: true });
+    if (sourceDay === targetDay) {
+      const reordered = [...sourceDay.cityEntries];
+      const [entry] = reordered.splice(source.entryIndex, 1);
+      const targetIndex = safeInsertionIndex(command.targetIndex, reordered.length);
+      reordered.splice(targetIndex, 0, { ...entry, manuallyPlaced: true });
+      const unchanged = reordered.every((candidate, index) =>
+        candidate.id === sourceDay.cityEntries[index]?.id &&
+        candidate.manuallyPlaced === sourceDay.cityEntries[index]?.manuallyPlaced
+      );
+      if (unchanged) return { plan, requiresConfirmation: false, changed: false };
+      sourceDay.cityEntries = reordered;
+      ensureValidOvernightPlace(sourceDay);
+      sourceDay.manuallyEdited = true;
+      return { plan: next, requiresConfirmation: false, changed: true };
+    }
+
+    const entry = sourceDay.cityEntries[source.entryIndex];
+    const remainingEntries = sourceDay.cityEntries.filter((candidate) => candidate.id !== entry.id);
+    const placeRemains = remainingEntries.some((candidate) => candidate.placeId === entry.placeId);
+    const removedPlaceIds = new Set(placeRemains ? [] : [entry.placeId]);
+    const previousArrivals = placeRemains
+      ? []
+      : previousArrivalReferences(next, source.dayIndex, entry.placeId);
+    const removesWholeDayRoute = remainingEntries.length === 0;
+    const affectsItems = removesWholeDayRoute
+      ? sourceDay.items.length > 0
+      : sourceDay.items.some((item) => itemReferencesPlace(item, removedPlaceIds));
+    const affectsLodging = Boolean(sourceDay.lodging) && (
+      removesWholeDayRoute || removedPlaceIds.has(sourceDay.lodging.placeId)
+    );
+    const affectedDayIndexes = new Set();
+    if (affectsItems || affectsLodging) affectedDayIndexes.add(source.dayIndex);
+    previousArrivals.forEach(({ dayIndex }) => {
+      affectedDayIndexes.add(dayIndex);
+      affectedDayIndexes.add(source.dayIndex);
+    });
+    if (affectedDayIndexes.size && !force) {
+      return {
+        plan,
+        requiresConfirmation: true,
+        changed: false,
+        confirmationReason: "cleanup-associated-content",
+        affectedDayIds: [...affectedDayIndexes]
+          .sort((left, right) => left - right)
+          .map((dayIndex) => next.days[dayIndex].id)
+      };
+    }
+
+    const arrivalItemsByDay = new Map();
+    previousArrivals.forEach(({ dayIndex, item }) => {
+      const items = arrivalItemsByDay.get(dayIndex) || new Set();
+      items.add(item);
+      arrivalItemsByDay.set(dayIndex, items);
+    });
+    arrivalItemsByDay.forEach((items, dayIndex) => {
+      const arrivalDay = next.days[dayIndex];
+      arrivalDay.items = arrivalDay.items.filter((item) => !items.has(item));
+      arrivalDay.manuallyEdited = true;
+    });
+
+    sourceDay.cityEntries.splice(source.entryIndex, 1);
+    if (sourceDay.cityEntries.length === 0) {
+      sourceDay.items = [];
+      sourceDay.lodging = null;
+    } else if (removedPlaceIds.size) {
+      sourceDay.items = sourceDay.items.filter((item) => !itemReferencesPlace(item, removedPlaceIds));
+      if (sourceDay.lodging && removedPlaceIds.has(sourceDay.lodging.placeId)) sourceDay.lodging = null;
+    }
     ensureValidOvernightPlace(sourceDay);
     sourceDay.manuallyEdited = true;
+
+    const targetIndex = safeInsertionIndex(command.targetIndex, targetDay.cityEntries.length);
+    targetDay.cityEntries.splice(targetIndex, 0, { ...entry, manuallyPlaced: true });
     targetDay.manuallyEdited = true;
     targetDay.overnightPlaceId ||= entry.placeId;
     return { plan: next, requiresConfirmation: false, changed: true };

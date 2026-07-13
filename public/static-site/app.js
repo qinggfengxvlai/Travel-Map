@@ -1,10 +1,19 @@
 import {
+  applyTripCommand,
   autoScheduleTrip,
   createTripPlan,
+  dayDate,
   reconcileRoutePlaces,
-  routePlaceIds
+  resolveTripPace,
+  routePlaceIds,
+  validateTripPlan
 } from "./trip-plan.js";
-import { mountTripEditor, renderTripEditorMarkup } from "./trip-editor.js";
+import {
+  commandForTripItemForm,
+  mountTripEditor,
+  renderTripEditorMarkup,
+  restoreTripEditorFocus
+} from "./trip-editor.js";
 
 const labels = {
   chooseStart: "\u9009\u62e9\u51fa\u53d1\u57ce\u5e02",
@@ -75,6 +84,7 @@ const DAILY_TRAVEL_LIMIT_SECONDS = 4 * 60 * 60;
 const MAX_DAILY_PLACES = 3;
 const CITY_PLAY_WINDOW_SECONDS = 10 * 60 * 60;
 const TRIP_STORAGE_KEY = "route-studio-trip-v1";
+const DEFAULT_TRIP_NAME = "\u6211\u7684\u65c5\u884c";
 
 const landmarkCatalog = {
   beijing: [
@@ -509,6 +519,17 @@ const undoTripEditBtn = document.querySelector("#undoTripEditBtn");
 const tripEditorRoot = document.querySelector("#tripEditorRoot");
 const itineraryEmptyState = document.querySelector("#itineraryEmptyState");
 const tripHealth = document.querySelector("#tripHealth");
+const tripItemDialog = document.querySelector("#tripItemDialog");
+const tripItemForm = document.querySelector("#tripItemForm");
+const tripItemDialogTitle = document.querySelector("#tripItemDialogTitle");
+const tripItemTypeLabel = document.querySelector("#tripItemTypeLabel");
+const tripItemTitleLabel = document.querySelector("#tripItemTitleLabel");
+const tripItemStartTimeLabel = document.querySelector("#tripItemStartTimeLabel");
+const tripItemEndTimeLabel = document.querySelector("#tripItemEndTimeLabel");
+const tripItemPlaceId = document.querySelector("#tripItemPlaceId");
+const tripItemTitle = document.querySelector("#tripItemTitle");
+const tripLandmarkOptions = document.querySelector("#tripLandmarkOptions");
+const tripItemCancelBtn = document.querySelector("#tripItemCancelBtn");
 const tripArchiveStatus = document.querySelector("#tripArchiveStatus");
 const appShell = document.querySelector(".app-shell");
 const mobileViewButtons = Array.from(document.querySelectorAll("[data-mobile-view]"));
@@ -1261,16 +1282,324 @@ function syncRoutesFromTripPlan() {
   routesToEstimate.forEach((route) => calculateRouteMetrics(route));
 }
 
-function commitTripPlan(nextPlan, { recordHistory = true, message = "\u5df2\u81ea\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002" } = {}) {
+function commitTripPlan(nextPlan, {
+  recordHistory = true,
+  message = "\u5df2\u81ea\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002",
+  focusToken = null
+} = {}) {
   if (recordHistory && state.tripPlan && state.tripPlan !== nextPlan) {
     state.tripHistory.push(structuredClone(state.tripPlan));
   }
   state.tripHistory = state.tripHistory.slice(-20);
   state.tripPlan = nextPlan;
+  state.tripPace = resolveTripPace(nextPlan, state.tripPace);
   syncRoutesFromTripPlan();
   renderRoutes();
   renderPanel();
+  if (focusToken) {
+    restoreTripEditorFocus(tripEditorRoot, focusToken);
+    window.requestAnimationFrame(() => restoreTripEditorFocus(tripEditorRoot, focusToken));
+  }
   persistTripState(message);
+}
+
+function tripIdentifier(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function affectedTripDayLabels(plan, dayIds) {
+  const uniqueDayIds = [...new Set(Array.isArray(dayIds) ? dayIds : [])];
+  return uniqueDayIds.flatMap((dayId) => {
+    const dayIndex = plan.days.findIndex((day) => day.id === dayId);
+    if (dayIndex < 0) return [];
+    let date = null;
+    try {
+      date = dayDate(plan, dayIndex);
+    } catch {
+      date = null;
+    }
+    return [`\u7b2c ${dayIndex + 1} \u5929${date ? `\uff08${date}\uff09` : ""}`];
+  });
+}
+
+function handleTripCommand(command, focusToken) {
+  if (!state.tripPlan || !command || typeof command !== "object" || Array.isArray(command)) return false;
+  let result = applyTripCommand(state.tripPlan, command);
+  if (result.requiresConfirmation) {
+    const labels = affectedTripDayLabels(state.tripPlan, result.affectedDayIds);
+    const target = labels.length ? labels.join("\u3001") : "\u76f8\u5173\u65e5\u671f";
+    const confirmationMessage = result.confirmationReason === "cleanup-associated-content"
+      ? `\u79fb\u52a8\u57ce\u5e02\u4f1a\u6e05\u7406${target}\u4e2d\u4e0e\u8be5\u57ce\u5e02\u5173\u8054\u7684\u4ea4\u901a\u3001\u6d3b\u52a8\u6216\u4f4f\u5bbf\u5185\u5bb9\uff0c\u662f\u5426\u7ee7\u7eed\uff1f`
+      : `\u6b64\u64cd\u4f5c\u4f1a\u5f71\u54cd${target}\u7684\u4ea4\u901a\u3001\u6d3b\u52a8\u6216\u4f4f\u5bbf\u5185\u5bb9\uff0c\u662f\u5426\u7ee7\u7eed\uff1f`;
+    const confirmed = window.confirm(confirmationMessage);
+    if (!confirmed) return false;
+    result = applyTripCommand(state.tripPlan, command, { force: true });
+  }
+  if (!result.changed) {
+    if (result.blockedReason === "item-place-mismatch") {
+      updateArchiveStatus("\u9879\u76ee\u4e0e\u76ee\u6807\u65e5\u671f\u7684\u57ce\u5e02\u4e0d\u5339\u914d\uff0c\u672a\u6267\u884c\u79fb\u52a8\u3002", "error");
+    }
+    return false;
+  }
+  commitTripPlan(result.plan, { focusToken });
+  return true;
+}
+
+function tripFormControl(name) {
+  return tripItemForm?.elements?.namedItem(name) ?? null;
+}
+
+function setTripFormValue(name, value) {
+  const control = tripFormControl(name);
+  if (!control) return;
+  if (control.type === "checkbox") {
+    control.checked = value === 1 || value === "1" || value === true;
+    return;
+  }
+  control.value = value === null || value === undefined ? "" : String(value);
+}
+
+function tripDayPlaceIds(day) {
+  const placeIds = [];
+  (Array.isArray(day?.cityEntries) ? day.cityEntries : []).forEach((entry) => {
+    const placeId = tripIdentifier(entry?.placeId);
+    if (placeId && !placeIds.includes(placeId)) placeIds.push(placeId);
+  });
+  return placeIds;
+}
+
+function populateTripPlaceSelect(control, placeIds, preferredPlaceId) {
+  if (!control) return "";
+  const options = placeIds.map((placeId) => {
+    const option = document.createElement("option");
+    option.value = placeId;
+    option.textContent = placeById(placeId)?.name || placeId;
+    return option;
+  });
+  control.replaceChildren(...options);
+  const preferred = tripIdentifier(preferredPlaceId);
+  const selected = preferred && placeIds.includes(preferred) ? preferred : (placeIds[0] || "");
+  control.value = selected;
+  return selected;
+}
+
+function landmarkNamesForPlace(placeId) {
+  const place = placeById(placeId);
+  const city = cityForPlace(place);
+  if (!city) return [];
+  const cacheKey = state.cityAdcodes.get(city.id) || city.id;
+  const cached = state.landmarkCache.get(cacheKey) || [];
+  return uniqueByName(
+    [...cityLandmarks(city), ...cached]
+      .map((landmark) => typeof landmark?.name === "string" ? landmark.name.trim() : "")
+      .filter(Boolean)
+  );
+}
+
+function renderTripLandmarkOptions(placeId) {
+  const names = landmarkNamesForPlace(placeId);
+  if (tripLandmarkOptions) {
+    tripLandmarkOptions.replaceChildren(...names.map((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      return option;
+    }));
+  }
+  return names;
+}
+
+function configureTripItemForm(type) {
+  const labels = {
+    transport: { type: "\u4ea4\u901a", title: "\u8f66\u6b21\u6216\u73ed\u6b21", start: "\u51fa\u53d1\u65f6\u95f4", end: "\u5230\u8fbe\u65f6\u95f4" },
+    activity: { type: "\u6d3b\u52a8", title: "\u6d3b\u52a8\u6807\u9898", start: "\u5f00\u59cb\u65f6\u95f4", end: "\u7ed3\u675f\u65f6\u95f4" },
+    lodging: { type: "\u4f4f\u5bbf", title: "\u4f4f\u5bbf\u540d\u79f0", start: "\u5165\u4f4f\u65f6\u95f4", end: "\u9000\u623f\u65f6\u95f4" }
+  }[type];
+  if (!labels || !tripItemForm) return false;
+  setTripFormValue("type", type);
+  if (tripItemTypeLabel) tripItemTypeLabel.textContent = labels.type;
+  if (tripItemTitleLabel) tripItemTitleLabel.textContent = labels.title;
+  if (tripItemStartTimeLabel) tripItemStartTimeLabel.textContent = labels.start;
+  if (tripItemEndTimeLabel) tripItemEndTimeLabel.textContent = labels.end;
+  tripItemForm.querySelectorAll("[data-trip-types]").forEach((field) => {
+    const supported = (field.dataset.tripTypes || "").split(/\s+/).includes(type);
+    field.hidden = !supported;
+    field.querySelectorAll("input, select, textarea").forEach((control) => {
+      control.disabled = !supported;
+    });
+  });
+  if (tripItemTitle) {
+    if (type === "activity") tripItemTitle.setAttribute("list", "tripLandmarkOptions");
+    else tripItemTitle.removeAttribute("list");
+  }
+  if (type !== "activity" && tripLandmarkOptions) tripLandmarkOptions.replaceChildren();
+  return true;
+}
+
+function closeTripItemDialog(returnValue = "cancel") {
+  if (!tripItemDialog) return;
+  if (tripItemDialog.open && typeof tripItemDialog.close === "function") {
+    tripItemDialog.close(returnValue);
+  } else {
+    tripItemDialog.removeAttribute("open");
+  }
+}
+
+function openTripItemDialog(request = {}) {
+  if (!tripItemDialog || !tripItemForm || !state.tripPlan) return;
+  const dayId = tripIdentifier(request.dayId);
+  const day = state.tripPlan.days.find((candidate) => candidate.id === dayId);
+  if (!day) return;
+  const placeIds = tripDayPlaceIds(day);
+  if (!placeIds.length) {
+    updateArchiveStatus("\u5f53\u5929\u6ca1\u6709\u53ef\u9009\u5730\u70b9\uff0c\u8bf7\u5148\u5b89\u6392\u57ce\u5e02\u3002", "error");
+    return;
+  }
+
+  let type;
+  let item = null;
+  if (request.action === "add-transport") type = "transport";
+  else if (request.action === "add-activity") type = "activity";
+  else if (request.action === "edit-lodging") type = "lodging";
+  else if (request.action === "edit-item") {
+    const itemId = tripIdentifier(request.itemId);
+    item = day.items.find((candidate) => candidate.id === itemId) || null;
+    if (!item || (item.type !== "transport" && item.type !== "activity")) return;
+    type = item.type;
+  } else {
+    return;
+  }
+
+  tripItemForm.reset();
+  if (!configureTripItemForm(type)) return;
+  setTripFormValue("dayId", day.id);
+  setTripFormValue("itemId", item?.id || "");
+  const isEditing = Boolean(item) || (type === "lodging" && day.lodging);
+  if (tripItemDialogTitle) {
+    tripItemDialogTitle.textContent = `${isEditing ? "\u7f16\u8f91" : "\u6dfb\u52a0"}${type === "transport" ? "\u4ea4\u901a" : type === "activity" ? "\u6d3b\u52a8" : "\u4f4f\u5bbf"}`;
+  }
+
+  if (type === "transport") {
+    populateTripPlaceSelect(tripFormControl("fromPlaceId"), placeIds, item?.fromPlaceId || placeIds[0]);
+    populateTripPlaceSelect(tripFormControl("toPlaceId"), placeIds, item?.toPlaceId || placeIds.at(-1));
+    setTripFormValue("serviceNo", item?.serviceNo);
+    setTripFormValue("startTime", item?.startTime);
+    setTripFormValue("endTime", item?.endTime);
+    setTripFormValue("endDayOffset", item?.endDayOffset);
+    setTripFormValue("note", item?.note);
+  } else if (type === "activity") {
+    const selectedPlaceId = populateTripPlaceSelect(
+      tripFormControl("placeId"),
+      placeIds,
+      item?.placeId || day.overnightPlaceId || placeIds[0]
+    );
+    renderTripLandmarkOptions(selectedPlaceId);
+    setTripFormValue("title", item?.title);
+    setTripFormValue("startTime", item?.startTime);
+    setTripFormValue("endTime", item?.endTime);
+    setTripFormValue("address", item?.address);
+    setTripFormValue("note", item?.note);
+  } else {
+    const lodging = day.lodging || {};
+    populateTripPlaceSelect(
+      tripFormControl("placeId"),
+      placeIds,
+      lodging.placeId || day.overnightPlaceId || placeIds[0]
+    );
+    setTripFormValue("title", lodging.name);
+    setTripFormValue("startTime", lodging.checkInTime);
+    setTripFormValue("endTime", lodging.checkOutTime);
+    setTripFormValue("address", lodging.address);
+    setTripFormValue("note", lodging.note);
+  }
+
+  if (!tripItemDialog.open) {
+    if (typeof tripItemDialog.showModal === "function") tripItemDialog.showModal();
+    else tripItemDialog.setAttribute("open", "");
+  }
+  const focusControl = type === "transport" ? tripFormControl("serviceNo") : tripFormControl("title");
+  window.requestAnimationFrame(() => focusControl?.focus());
+}
+
+function submitTripItemForm(event) {
+  event.preventDefault();
+  if (!tripItemForm || !state.tripPlan) return;
+  const values = Object.fromEntries(new FormData(tripItemForm).entries());
+  try {
+    const command = commandForTripItemForm(values, {
+      landmarkNames: values.type === "activity" ? landmarkNamesForPlace(values.placeId) : []
+    });
+    closeTripItemDialog("saved");
+    handleTripCommand(command, { action: "day", dayId: command.dayId });
+  } catch {
+    updateArchiveStatus("\u8bf7\u8865\u5168\u5f53\u524d\u7f16\u8f91\u9879\u76ee\u7684\u5fc5\u586b\u4fe1\u606f\u3002", "error");
+  }
+}
+
+function updateTripNameMetadata() {
+  if (!tripNameInput || !state.tripPlan) return;
+  const currentName = typeof state.tripPlan.name === "string" && state.tripPlan.name.trim()
+    ? state.tripPlan.name.trim().slice(0, 60)
+    : DEFAULT_TRIP_NAME;
+  const requestedName = tripNameInput.value.trim().slice(0, 60);
+  const name = requestedName || currentName;
+  tripNameInput.value = name;
+  handleTripCommand({ type: "update-metadata", patch: { name } });
+}
+
+function updateTripStartDateMetadata() {
+  if (!tripStartDateInput || !state.tripPlan) return;
+  handleTripCommand({
+    type: "update-metadata",
+    patch: { startDate: tripStartDateInput.value || null }
+  });
+}
+
+function undoTripEdit() {
+  const previous = state.tripHistory.pop();
+  if (!previous) return;
+  commitTripPlan(previous, {
+    recordHistory: false,
+    message: "\u5df2\u64a4\u9500\u4e0a\u4e00\u6b21\u884c\u7a0b\u7f16\u8f91\u3002"
+  });
+}
+
+function routeDurationsForAutoSchedule(placeIds) {
+  const durations = {};
+  placeIds.slice(1).forEach((to, index) => {
+    const from = placeIds[index];
+    const indexedRoute = state.routes[index];
+    const route = indexedRoute?.from === from && indexedRoute?.to === to
+      ? indexedRoute
+      : state.routes.find((candidate) => candidate.from === from && candidate.to === to);
+    durations[`${from}>${to}`] = route ? routeDurationForPlanning(route) : 2 * 60 * 60;
+  });
+  return durations;
+}
+
+function autoScheduleCurrentTrip() {
+  const plan = state.tripPlan;
+  if (!plan || !Array.isArray(plan.days) || !plan.days.length) return;
+  if (plan.days.some((day) => day.manuallyEdited)) {
+    const confirmed = window.confirm(
+      "\u81ea\u52a8\u6392\u671f\u4f1a\u91cd\u65b0\u6309\u5f53\u524d\u8282\u594f\u62c6\u5206\u65e5\u671f\uff0c\u5e76\u8986\u76d6\u5df2\u6709\u624b\u52a8\u65e5\u671f\u5b89\u6392\u3002\u662f\u5426\u7ee7\u7eed\uff1f"
+    );
+    if (!confirmed) return;
+  }
+  const placeIds = routePlaceIds(plan);
+  const metadata = {
+    name: typeof plan.name === "string" && plan.name.trim() ? plan.name : DEFAULT_TRIP_NAME,
+    startDate: plan.startDate || null,
+    pace: plan.pace || state.tripPace
+  };
+  const nextPlan = autoScheduleTrip({
+    placeIds,
+    durations: routeDurationsForAutoSchedule(placeIds),
+    paceProfile: tripPaceProfile(metadata.pace),
+    metadata
+  });
+  commitTripPlan(nextPlan, {
+    message: "\u5df2\u6309\u5f53\u524d\u884c\u7a0b\u8282\u594f\u91cd\u65b0\u81ea\u52a8\u6392\u671f\u3002"
+  });
 }
 
 function renderPanel() {
@@ -1346,8 +1675,8 @@ function renderTripPlanner() {
 
   const plan = state.tripPlan;
   const hasCalendar = Array.isArray(plan?.days) && plan.days.length > 0;
-  if (tripNameInput) tripNameInput.value = plan?.name || "";
-  if (tripStartDateInput) tripStartDateInput.value = plan?.startDate || "";
+  if (tripNameInput && document.activeElement !== tripNameInput) tripNameInput.value = plan?.name || "";
+  if (tripStartDateInput && document.activeElement !== tripStartDateInput) tripStartDateInput.value = plan?.startDate || "";
   if (autoScheduleBtn) autoScheduleBtn.disabled = !hasCalendar;
   if (undoTripEditBtn) undoTripEditBtn.disabled = state.tripHistory.length === 0;
   itineraryEmptyState.hidden = hasCalendar;
@@ -1362,25 +1691,28 @@ function renderTripPlanner() {
 
   const pace = tripPaceProfile(plan.pace);
   const planPlaceIds = routePlaceIds(plan);
+  const warnings = validateTripPlan(plan, { paceProfile: pace });
   itineraryMeta.textContent = `${plan.days.length} \u5929 \u00b7 ${pace.label} \u00b7 ${planPlaceIds.length} \u4e2a\u5730\u70b9`;
   const errorCount = state.routes.filter((route) => route.status === "error").length;
   const loadingCount = state.routes.filter((route) => route.status === "loading").length;
+  const healthMessages = [];
+  if (warnings.length) healthMessages.push(`\u53d1\u73b0 ${warnings.length} \u9879\u884c\u7a0b\u63d0\u9192`);
+  if (errorCount) healthMessages.push(`${errorCount} \u6bb5\u8def\u7ebf\u6682\u65f6\u65e0\u6cd5\u4f30\u7b97`);
+  else if (loadingCount) healthMessages.push(`\u6b63\u5728\u4f30\u7b97 ${loadingCount} \u6bb5\u8def\u7ebf`);
+  if (!healthMessages.length) healthMessages.push(`${plan.days.length} \u5929\u884c\u7a0b\u5df2\u4e0e\u5730\u56fe\u8def\u7ebf\u540c\u6b65`);
   tripHealth.hidden = false;
-  tripHealth.className = `trip-health${errorCount ? " warning" : ""}`;
-  tripHealth.textContent = errorCount
-    ? `\u6709 ${errorCount} \u6bb5\u8def\u7ebf\u6682\u65f6\u65e0\u6cd5\u4f30\u7b97\u3002`
-    : loadingCount
-      ? `\u6b63\u5728\u4f30\u7b97 ${loadingCount} \u6bb5\u8def\u7ebf\u3002`
-      : `${plan.days.length} \u5929\u884c\u7a0b\u5df2\u4e0e\u5730\u56fe\u8def\u7ebf\u540c\u6b65\u3002`;
+  tripHealth.className = `trip-health${errorCount || warnings.length ? " warning" : ""}`;
+  tripHealth.textContent = `${healthMessages.join("\uff1b")}\u3002`;
 
   tripEditorRoot.innerHTML = renderTripEditorMarkup({
     plan,
+    warnings,
     placeName: (placeId) => placeById(placeId)?.name || placeId
   });
   state.tripEditorDestroy = mountTripEditor({
     root: tripEditorRoot,
-    onCommand: () => {},
-    onEditRequest: () => {}
+    onCommand: handleTripCommand,
+    onEditRequest: openTripItemDialog
   });
 }
 
@@ -3356,6 +3688,17 @@ exitCityViewBtn.addEventListener("click", () => exitCityView());
 transportButtons.forEach((button) => button.addEventListener("click", () => setTransportMode(button.dataset.mode)));
 paceButtons.forEach((button) => button.addEventListener("click", () => setTripPace(button.dataset.pace)));
 mobileViewButtons.forEach((button) => button.addEventListener("click", () => setMobileView(button.dataset.mobileView)));
+if (tripNameInput) tripNameInput.addEventListener("change", updateTripNameMetadata);
+if (tripStartDateInput) tripStartDateInput.addEventListener("change", updateTripStartDateMetadata);
+if (autoScheduleBtn) autoScheduleBtn.addEventListener("click", autoScheduleCurrentTrip);
+if (undoTripEditBtn) undoTripEditBtn.addEventListener("click", undoTripEdit);
+if (tripItemForm) tripItemForm.addEventListener("submit", submitTripItemForm);
+if (tripItemCancelBtn) tripItemCancelBtn.addEventListener("click", () => closeTripItemDialog());
+if (tripItemPlaceId) {
+  tripItemPlaceId.addEventListener("change", () => {
+    if (tripFormControl("type")?.value === "activity") renderTripLandmarkOptions(tripItemPlaceId.value);
+  });
+}
 citySearch.addEventListener("input", updateSearchResults);
 citySearch.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || !state.searchResults.length) return;

@@ -1,4 +1,4 @@
-import { dayDate } from "./trip-plan.js";
+import { canMoveTripItemToDay, dayDate } from "./trip-plan.js";
 
 const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 const WARNING_LABELS = new Map([
@@ -32,6 +32,81 @@ function identifier(value) {
 
 function childArray(value) {
   return Array.isArray(value) ? value.filter(isRecord) : [];
+}
+
+function formText(value) {
+  return value === null || value === undefined ? "" : String(value).trim();
+}
+
+function requiredFormText(value, fieldName) {
+  if (typeof value !== "string") throw new TypeError(`${fieldName} must be a non-empty string`);
+  const normalized = value.trim();
+  if (!normalized) throw new TypeError(`${fieldName} must be a non-empty string`);
+  return normalized;
+}
+
+function formItemWithId(values, item) {
+  const itemId = formText(values.itemId);
+  return itemId ? { id: itemId, ...item } : item;
+}
+
+export function commandForTripItemForm(values, { landmarkNames = [] } = {}) {
+  if (!isRecord(values)) throw new TypeError("trip item form values must be an object");
+  const type = requiredFormText(values.type, "type");
+  const dayId = requiredFormText(values.dayId, "dayId");
+  if (type === "transport") {
+    return {
+      type: "upsert-item",
+      dayId,
+      item: formItemWithId(values, {
+        type,
+        fromPlaceId: requiredFormText(values.fromPlaceId, "fromPlaceId"),
+        toPlaceId: requiredFormText(values.toPlaceId, "toPlaceId"),
+        serviceNo: formText(values.serviceNo),
+        startTime: formText(values.startTime),
+        endTime: formText(values.endTime),
+        endDayOffset: values.endDayOffset === 1 || values.endDayOffset === "1" || values.endDayOffset === true || values.endDayOffset === "on" ? 1 : 0,
+        note: formText(values.note)
+      })
+    };
+  }
+  if (type === "activity") {
+    const title = requiredFormText(values.title, "title");
+    const candidates = new Set(
+      (Array.isArray(landmarkNames) ? landmarkNames : [])
+        .map(formText)
+        .filter(Boolean)
+    );
+    return {
+      type: "upsert-item",
+      dayId,
+      item: formItemWithId(values, {
+        type,
+        placeId: requiredFormText(values.placeId, "placeId"),
+        title,
+        startTime: formText(values.startTime),
+        endTime: formText(values.endTime),
+        address: formText(values.address),
+        note: formText(values.note),
+        sourceType: candidates.has(title) ? "landmark" : "custom"
+      })
+    };
+  }
+  if (type === "lodging") {
+    return {
+      type: "set-lodging",
+      dayId,
+      lodging: {
+        placeId: requiredFormText(values.placeId, "placeId"),
+        name: requiredFormText(values.title, "title"),
+        address: formText(values.address),
+        checkInTime: formText(values.startTime),
+        checkOutTime: formText(values.endTime),
+        note: formText(values.note)
+      }
+    };
+  }
+  throw new TypeError(`unsupported trip item type: ${type}`);
 }
 
 function placeLabel(placeId, placeName) {
@@ -83,19 +158,20 @@ function visitTotals(days) {
   return totals;
 }
 
-function dayOptions(plan, days) {
-  return days.map((day, dayIndex) => {
+function dayOptions(plan, days, isAllowed = () => true) {
+  return days.flatMap((day, dayIndex) => {
+    if (!isAllowed(day, dayIndex)) return [];
     const date = safeDayDate(plan, dayIndex);
     const label = `第 ${dayIndex + 1} 天${date ? ` · ${date}` : ""}`;
-    return `<option value="${escapeHtml(day.id)}">${escapeHtml(label)}</option>`;
+    return [`<option value="${escapeHtml(day.id)}">${escapeHtml(label)}</option>`];
   }).join("");
 }
 
-function moveDayOptions(plan, days) {
-  return `<option value="" selected disabled>移动到…</option>${dayOptions(plan, days)}`;
+function moveDayOptions(plan, days, isAllowed) {
+  return `<option value="" selected disabled>移动到…</option>${dayOptions(plan, days, isAllowed)}`;
 }
 
-function visitMarkup(entry, totals, seenVisits) {
+function visitMarkup(entry, totals, seenVisits, dayId) {
   const visitId = identifier(entry.visitId);
   if (!visitId) return '<span class="visit-progress">停留天数待定</span>';
   const duration = totals.get(visitId) ?? 1;
@@ -105,28 +181,31 @@ function visitMarkup(entry, totals, seenVisits) {
     return `<span class="visit-progress">停留第 ${position}/${duration} 天</span>`;
   }
   const escapedVisitId = escapeHtml(visitId);
+  const escapedDayId = escapeHtml(dayId);
   const decreaseDisabled = duration <= 1 ? " disabled" : "";
   const increaseDisabled = duration >= 7 ? " disabled" : "";
   return `<div class="visit-duration" aria-label="停留天数">
-    <button type="button" data-action="decrease-stay" data-visit-id="${escapedVisitId}" data-duration="${duration}" title="减少停留天数" aria-label="减少停留天数"${decreaseDisabled}>−</button>
+    <button type="button" data-action="decrease-stay" data-day-id="${escapedDayId}" data-visit-id="${escapedVisitId}" data-duration="${duration}" title="减少停留天数" aria-label="减少停留天数"${decreaseDisabled}>−</button>
     <span>停留 ${duration} 天</span>
-    <button type="button" data-action="increase-stay" data-visit-id="${escapedVisitId}" data-duration="${duration}" title="增加停留天数" aria-label="增加停留天数"${increaseDisabled}>+</button>
+    <button type="button" data-action="increase-stay" data-day-id="${escapedDayId}" data-visit-id="${escapedVisitId}" data-duration="${duration}" title="增加停留天数" aria-label="增加停留天数"${increaseDisabled}>+</button>
   </div>`;
 }
 
 function cityMarkup({ entry, dayIndex, plan, days, placeName, totals, seenVisits }) {
   const entryId = escapeHtml(entry.id);
-  return `<div class="city-row" draggable="true" data-drag-kind="city" data-drag-id="${entryId}">
+  const rawDayId = days[dayIndex]?.id;
+  const dayId = escapeHtml(rawDayId);
+  return `<div class="city-row" draggable="true" data-drag-kind="city" data-drag-id="${entryId}" data-day-id="${dayId}">
     <span class="drag-handle" title="拖拽移动城市" aria-label="拖拽移动城市">⋮⋮</span>
     <span class="city-name">${placeLabel(entry.placeId, placeName)}</span>
-    ${visitMarkup(entry, totals, seenVisits)}
+    ${visitMarkup(entry, totals, seenVisits, rawDayId)}
     <label class="move-control">
       <span>移动到</span>
-      <select data-action="move-city" data-entry-id="${entryId}" data-target-index="0" title="移动城市" aria-label="移动城市到指定日期">
+      <select data-action="move-city" data-day-id="${dayId}" data-entry-id="${entryId}" data-target-index="0" title="移动城市" aria-label="移动城市到指定日期">
         ${moveDayOptions(plan, days)}
       </select>
     </label>
-    <button type="button" data-action="remove-city" data-entry-id="${entryId}" title="删除城市" aria-label="删除城市">删除</button>
+    <button type="button" data-action="remove-city" data-day-id="${dayId}" data-entry-id="${entryId}" title="删除城市" aria-label="删除城市">删除</button>
   </div>`;
 }
 
@@ -177,7 +256,7 @@ function itemTitle(item, placeName) {
 function itemMarkup({ item, day, dayIndex, plan, days, placeName }) {
   const itemId = escapeHtml(item.id);
   const dayId = escapeHtml(day.id);
-  return `<li class="timeline-item" draggable="true" data-drag-kind="item" data-drag-id="${itemId}">
+  return `<li class="timeline-item" draggable="true" data-drag-kind="item" data-drag-id="${itemId}" data-day-id="${dayId}">
     <span class="drag-handle" title="拖拽移动项目" aria-label="拖拽移动项目">⋮⋮</span>
     <div class="timeline-content">
       <strong>${itemTitle(item, placeName)}</strong>
@@ -185,14 +264,14 @@ function itemMarkup({ item, day, dayIndex, plan, days, placeName }) {
     </div>
     <div class="item-actions">
       <button type="button" data-action="edit-item" data-day-id="${dayId}" data-item-id="${itemId}" title="编辑项目" aria-label="编辑项目">编辑</button>
-      <button type="button" data-action="copy-item" data-item-id="${itemId}" title="复制项目" aria-label="复制项目">复制</button>
+      <button type="button" data-action="copy-item" data-day-id="${dayId}" data-item-id="${itemId}" title="复制项目" aria-label="复制项目">复制</button>
       <label class="move-control">
         <span>移动到</span>
-        <select data-action="move-item" data-item-id="${itemId}" data-target-index="0" title="移动项目" aria-label="移动项目到指定日期">
-          ${moveDayOptions(plan, days)}
+        <select data-action="move-item" data-day-id="${dayId}" data-item-id="${itemId}" data-target-index="0" title="移动项目" aria-label="移动项目到指定日期">
+          ${moveDayOptions(plan, days, (candidate) => canMoveTripItemToDay(plan, item, candidate.id))}
         </select>
       </label>
-      <button type="button" data-action="remove-item" data-item-id="${itemId}" title="删除项目" aria-label="删除项目">删除</button>
+      <button type="button" data-action="remove-item" data-day-id="${dayId}" data-item-id="${itemId}" title="删除项目" aria-label="删除项目">删除</button>
     </div>
   </li>`;
 }
@@ -243,7 +322,7 @@ export function renderTripEditorMarkup({ plan, warnings = [], placeName } = {}) 
       ? entries.map((entry) => placeLabel(entry.placeId, placeName)).join(" → ")
       : "路线待定";
     const dayWarnings = safeWarnings.filter((warning) => warning.dayId === day.id);
-    return `<li class="day-card" data-day-id="${escapeHtml(day.id)}" data-drop-day="${escapeHtml(day.id)}">
+    return `<li class="day-card" data-day-id="${escapeHtml(day.id)}" data-drop-day="${escapeHtml(day.id)}" tabindex="-1">
       <header class="day-header">
         <p class="day-heading">${dayHeading(plan, dayIndex)}</p>
         <h3>${route}</h3>
@@ -280,6 +359,49 @@ function safeInteger(value, minimum) {
   const number = Number(value);
   if (!Number.isSafeInteger(number) || number < minimum) return null;
   return number;
+}
+
+export function focusTokenForAction(data) {
+  if (!isRecord(data)) return null;
+  const action = identifier(data.action);
+  if (!action) return null;
+  const token = { action };
+  ["dayId", "targetDayId", "entryId", "itemId", "visitId"].forEach((key) => {
+    const value = identifier(data[key]);
+    if (value) token[key] = value;
+  });
+  return token;
+}
+
+function focusElement(element) {
+  if (!element || element.disabled || typeof element.focus !== "function") return false;
+  element.focus();
+  return true;
+}
+
+export function restoreTripEditorFocus(root, token) {
+  if (!root || typeof root.querySelectorAll !== "function" || !isRecord(token)) return false;
+  const identityKeys = ["entryId", "itemId", "visitId"].filter((key) => identifier(token[key]));
+  const actionControl = [...root.querySelectorAll("[data-action]")].find((control) => {
+    if (control?.dataset?.action !== token.action) return false;
+    if (identityKeys.length) {
+      return identityKeys.every((key) => control.dataset?.[key] === token[key]);
+    }
+    return identifier(token.dayId) ? control.dataset?.dayId === token.dayId : false;
+  });
+  if (focusElement(actionControl)) return true;
+
+  const dayCards = [...root.querySelectorAll(".day-card")];
+  const fallbackDayIds = [token.dayId, token.targetDayId].filter(identifier);
+  for (const dayId of fallbackDayIds) {
+    const dayCard = dayCards.find((candidate) => candidate?.dataset?.dayId === dayId);
+    if (focusElement(dayCard)) return true;
+  }
+  if (focusElement(dayCards[0])) return true;
+  if (typeof root.focus !== "function") return false;
+  root.tabIndex = -1;
+  root.focus();
+  return true;
 }
 
 export function commandForAction(data) {
@@ -364,7 +486,7 @@ export function mountTripEditor(options = {}) {
       return;
     }
     const command = commandForAction(control.dataset);
-    if (command) onCommand(command);
+    if (command) onCommand(command, focusTokenForAction(control.dataset));
   };
 
   const onChange = (event) => {
@@ -379,7 +501,7 @@ export function mountTripEditor(options = {}) {
       return;
     }
     const command = commandForAction(data);
-    if (command) onCommand(command);
+    if (command) onCommand(command, focusTokenForAction(data));
   };
 
   const onDragStart = (event) => {
@@ -416,10 +538,11 @@ export function mountTripEditor(options = {}) {
     if (!isRecord(payload) || (payload.kind !== "city" && payload.kind !== "item")) return;
     const id = identifier(payload.id);
     if (!id) return;
-    const command = commandForAction(payload.kind === "city"
+    const data = payload.kind === "city"
       ? { action: "move-city", entryId: id, targetDayId, targetIndex: 0 }
-      : { action: "move-item", itemId: id, targetDayId, targetIndex: 0 });
-    if (command) onCommand(command);
+      : { action: "move-item", itemId: id, targetDayId, targetIndex: 0 };
+    const command = commandForAction(data);
+    if (command) onCommand(command, focusTokenForAction(data));
   };
 
   const listeners = [

@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   commandForAction,
+  commandForTripItemForm,
   mountTripEditor,
   renderTripEditorMarkup
 } from "../public/static-site/trip-editor.js";
@@ -163,10 +164,184 @@ class FakeDataTransfer {
   }
 }
 
+function assertContainsNoUndefined(value, path = "command") {
+  if (Array.isArray(value)) {
+    value.forEach((entry, index) => assertContainsNoUndefined(entry, `${path}[${index}]`));
+    return;
+  }
+  if (!value || typeof value !== "object") return;
+  Object.entries(value).forEach(([key, entry]) => {
+    assert.notEqual(entry, undefined, `${path}.${key} must not be undefined`);
+    assertContainsNoUndefined(entry, `${path}.${key}`);
+  });
+}
+
+test("converts a trimmed transport form and preserves the edited item ID", () => {
+  const command = commandForTripItemForm({
+    type: " transport ",
+    dayId: " day-1 ",
+    itemId: " item-7 ",
+    fromPlaceId: " chengdu ",
+    toPlaceId: " chongqing ",
+    serviceNo: " G123 ",
+    startTime: " 22:30 ",
+    endTime: " 01:10 ",
+    endDayOffset: "1",
+    note: " 从东广场进站 "
+  });
+
+  assert.deepEqual(command, {
+    type: "upsert-item",
+    dayId: "day-1",
+    item: {
+      id: "item-7",
+      type: "transport",
+      fromPlaceId: "chengdu",
+      toPlaceId: "chongqing",
+      serviceNo: "G123",
+      startTime: "22:30",
+      endTime: "01:10",
+      endDayOffset: 1,
+      note: "从东广场进站"
+    }
+  });
+  assertContainsNoUndefined(command);
+});
+
+test("normalizes transport optional text and end-day offset", () => {
+  const command = commandForTripItemForm({
+    type: "transport",
+    dayId: "day-1",
+    fromPlaceId: "chengdu",
+    toPlaceId: "chongqing",
+    serviceNo: null,
+    startTime: "   ",
+    endTime: undefined,
+    endDayOffset: "unexpected",
+    note: null
+  });
+
+  assert.deepEqual(command.item, {
+    type: "transport",
+    fromPlaceId: "chengdu",
+    toPlaceId: "chongqing",
+    serviceNo: "",
+    startTime: "",
+    endTime: "",
+    endDayOffset: 0,
+    note: ""
+  });
+  assertContainsNoUndefined(command);
+});
+
+test("converts an activity candidate to a landmark command", () => {
+  const command = commandForTripItemForm({
+    type: "activity",
+    dayId: "day-2",
+    placeId: " chengdu ",
+    title: " 宽窄巷子 ",
+    startTime: " 09:00 ",
+    endTime: " 11:30 ",
+    address: " 青羊区 ",
+    note: " 提前预约 "
+  }, {
+    landmarkNames: ["武侯祠", " 宽窄巷子 "]
+  });
+
+  assert.deepEqual(command, {
+    type: "upsert-item",
+    dayId: "day-2",
+    item: {
+      type: "activity",
+      placeId: "chengdu",
+      title: "宽窄巷子",
+      startTime: "09:00",
+      endTime: "11:30",
+      address: "青羊区",
+      note: "提前预约",
+      sourceType: "landmark"
+    }
+  });
+  assertContainsNoUndefined(command);
+});
+
+test("marks a self-entered activity as custom and normalizes empty text", () => {
+  const command = commandForTripItemForm({
+    type: "activity",
+    dayId: "day-2",
+    itemId: "",
+    placeId: "chengdu",
+    title: " 河边散步 ",
+    startTime: null,
+    endTime: undefined,
+    address: " ",
+    note: null
+  }, {
+    landmarkNames: ["宽窄巷子"]
+  });
+
+  assert.deepEqual(command.item, {
+    type: "activity",
+    placeId: "chengdu",
+    title: "河边散步",
+    startTime: "",
+    endTime: "",
+    address: "",
+    note: "",
+    sourceType: "custom"
+  });
+  assert.equal(Object.hasOwn(command.item, "id"), false);
+  assertContainsNoUndefined(command);
+});
+
+test("converts lodging form values to set-lodging", () => {
+  const command = commandForTripItemForm({
+    type: "lodging",
+    dayId: " day-3 ",
+    placeId: " xian ",
+    title: " 城墙景观酒店 ",
+    startTime: " 18:00 ",
+    endTime: " 09:00 ",
+    address: " 南门附近 ",
+    note: " 可寄存行李 "
+  });
+
+  assert.deepEqual(command, {
+    type: "set-lodging",
+    dayId: "day-3",
+    lodging: {
+      placeId: "xian",
+      name: "城墙景观酒店",
+      address: "南门附近",
+      checkInTime: "18:00",
+      checkOutTime: "09:00",
+      note: "可寄存行李"
+    }
+  });
+  assertContainsNoUndefined(command);
+});
+
+test("rejects invalid form types, day IDs, and required place relationships", () => {
+  const invalidValues = [
+    null,
+    {},
+    { type: "food", dayId: "day-1" },
+    { type: "activity", dayId: "   ", placeId: "chengdu", title: "散步" },
+    { type: "transport", dayId: "day-1", fromPlaceId: "", toPlaceId: "chongqing" },
+    { type: "activity", dayId: "day-1", placeId: "", title: "散步" },
+    { type: "lodging", dayId: "day-1", placeId: "xian", title: "" }
+  ];
+
+  invalidValues.forEach((values) => {
+    assert.throws(() => commandForTripItemForm(values), TypeError);
+  });
+});
+
 test("renders dated day controls and visit duration", () => {
   const html = renderTripEditorMarkup({ plan, warnings: [], placeName: () => "成都" });
   assert.match(html, /第 1 天/);
   assert.match(html, /2026-10-01/);
+  assert.match(html, /class="day-card"[^>]*data-day-id="day-1"[^>]*tabindex="-1"/);
   assert.match(html, /data-action="increase-stay"/);
   assert.match(html, /data-action="add-activity"/);
 });
@@ -300,9 +475,18 @@ test("renders timeline details, item commands, day actions, and lodging summary"
   const currentItemDay = openingTagWith(moveItem, "option", 'value="day-1"');
   assert.ok(currentItemDay);
   assert.ok(!currentItemDay.includes("selected"));
-  assert.ok(moveItem?.includes('value="day-2"'));
+  assert.ok(!moveItem?.includes('value="day-2"'));
   assert.match(moveItem, /title=/);
   assert.match(moveItem, /aria-label=/);
+
+  const activityMove = elementWith(
+    html,
+    "select",
+    'data-action="move-item"',
+    'data-item-id="activity-1"'
+  );
+  assert.ok(activityMove?.includes('value="day-1"'));
+  assert.ok(!activityMove?.includes('value="day-2"'));
 
   for (const action of ["add-transport", "add-activity", "edit-lodging"]) {
     assert.ok(openingTagWith(
@@ -662,6 +846,101 @@ test("click delegation separates edit requests from domain commands", () => {
     target: fakeElement({ action: "remove-city", entryId: "ce-after-cleanup" })
   });
   assert.equal(commands.length, 2);
+});
+
+test("editor commands include stable focus tokens from their source controls", () => {
+  const root = new FakeRoot();
+  const received = [];
+  mountTripEditor({
+    root,
+    onCommand: (command, focusToken) => received.push({ command, focusToken }),
+    onEditRequest: () => {}
+  });
+
+  root.emit("click", {
+    target: fakeElement({
+      action: "remove-item",
+      dayId: "day-1",
+      itemId: "item-1"
+    })
+  });
+  root.emit("change", {
+    target: fakeElement({
+      action: "move-city",
+      dayId: "day-1",
+      entryId: "entry-1",
+      targetIndex: "0"
+    }, { value: "day-2" })
+  });
+
+  assert.deepEqual(received, [{
+    command: { type: "remove-item", itemId: "item-1" },
+    focusToken: {
+      action: "remove-item",
+      dayId: "day-1",
+      itemId: "item-1"
+    }
+  }, {
+    command: { type: "move-city", entryId: "entry-1", targetDayId: "day-2", targetIndex: 0 },
+    focusToken: {
+      action: "move-city",
+      dayId: "day-1",
+      targetDayId: "day-2",
+      entryId: "entry-1"
+    }
+  }]);
+});
+
+test("focus restoration prefers equivalent controls and falls back to a day or root", async () => {
+  const editorModule = await import("../public/static-site/trip-editor.js");
+  assert.equal(typeof editorModule.restoreTripEditorFocus, "function");
+  const focused = [];
+  const focusable = (dataset, name, disabled = false) => ({
+    dataset,
+    disabled,
+    focus: () => focused.push(name)
+  });
+  const actionControl = focusable({ action: "move-item", dayId: "day-2", itemId: "item-1" }, "action");
+  const sourceDay = focusable({ dayId: "day-1" }, "source-day");
+  const targetDay = focusable({ dayId: "day-2" }, "target-day");
+  const root = {
+    querySelectorAll(selector) {
+      if (selector === "[data-action]") return [actionControl];
+      if (selector === ".day-card") return [sourceDay, targetDay];
+      return [];
+    },
+    focus: () => focused.push("root")
+  };
+
+  assert.equal(editorModule.restoreTripEditorFocus(root, {
+    action: "move-item",
+    dayId: "day-1",
+    targetDayId: "day-2",
+    itemId: "item-1"
+  }), true);
+  assert.deepEqual(focused, ["action"]);
+
+  focused.length = 0;
+  assert.equal(editorModule.restoreTripEditorFocus(root, {
+    action: "remove-item",
+    dayId: "day-1",
+    itemId: "removed-item"
+  }), true);
+  assert.deepEqual(focused, ["source-day"]);
+
+  focused.length = 0;
+  assert.equal(editorModule.restoreTripEditorFocus(root, {
+    action: "remove-city",
+    dayId: "missing-day",
+    targetDayId: "day-2",
+    entryId: "removed-entry"
+  }), true);
+  assert.deepEqual(focused, ["target-day"]);
+
+  focused.length = 0;
+  const emptyRoot = { querySelectorAll: () => [], focus: () => focused.push("root") };
+  assert.equal(editorModule.restoreTripEditorFocus(emptyRoot, { action: "remove-city", dayId: "last-day" }), true);
+  assert.deepEqual(focused, ["root"]);
 });
 
 test("edit requests receive a detached dataset snapshot", () => {

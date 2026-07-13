@@ -173,6 +173,84 @@
       </section>
     </main>
 
+    <input id="tripImportInput" type="file" accept=".trip.json,application/json" aria-label="导入行程文件" hidden />
+
+    <dialog id="tripItemDialog" aria-labelledby="tripItemDialogTitle">
+      <form id="tripItemForm" class="trip-item-form">
+        <header class="trip-dialog-header">
+          <div>
+            <p class="eyebrow">日历编辑</p>
+            <h2 id="tripItemDialogTitle">添加活动</h2>
+          </div>
+          <p class="trip-dialog-mode"><span>类型</span><strong id="tripItemTypeLabel">活动</strong></p>
+        </header>
+
+        <input id="tripItemDayId" type="hidden" name="dayId" />
+        <input id="tripItemId" type="hidden" name="itemId" />
+        <input id="tripItemType" type="hidden" name="type" />
+
+        <div class="trip-form-scroll">
+          <div class="trip-form-grid">
+            <label class="trip-form-field trip-form-field-wide" data-trip-types="activity lodging" for="tripItemPlaceId">
+              <span>地点</span>
+              <select id="tripItemPlaceId" name="placeId" required aria-required="true"></select>
+            </label>
+
+            <label class="trip-form-field trip-form-field-wide" data-trip-types="activity lodging" for="tripItemTitle">
+              <span id="tripItemTitleLabel">活动标题</span>
+              <input id="tripItemTitle" name="title" maxlength="100" autocomplete="off" list="tripLandmarkOptions" required aria-required="true" />
+            </label>
+            <datalist id="tripLandmarkOptions"></datalist>
+
+            <label class="trip-form-field trip-form-field-wide" data-trip-types="transport" for="tripItemServiceNo">
+              <span>车次或班次</span>
+              <input id="tripItemServiceNo" name="serviceNo" maxlength="40" autocomplete="off" />
+            </label>
+
+            <label class="trip-form-field" data-trip-types="transport" for="tripItemFromPlaceId">
+              <span>出发地</span>
+              <select id="tripItemFromPlaceId" name="fromPlaceId" required aria-required="true"></select>
+            </label>
+
+            <label class="trip-form-field" data-trip-types="transport" for="tripItemToPlaceId">
+              <span>目的地</span>
+              <select id="tripItemToPlaceId" name="toPlaceId" required aria-required="true"></select>
+            </label>
+
+            <label class="trip-form-field" for="tripItemStartTime">
+              <span id="tripItemStartTimeLabel">开始时间</span>
+              <input id="tripItemStartTime" name="startTime" type="time" />
+            </label>
+
+            <label class="trip-form-field" for="tripItemEndTime">
+              <span id="tripItemEndTimeLabel">结束时间</span>
+              <input id="tripItemEndTime" name="endTime" type="time" />
+            </label>
+
+            <label class="trip-form-check trip-form-field-wide" data-trip-types="transport" for="tripItemEndDayOffset">
+              <input id="tripItemEndDayOffset" name="endDayOffset" type="checkbox" value="1" />
+              <span>次日到达</span>
+            </label>
+
+            <label class="trip-form-field trip-form-field-wide" data-trip-types="activity lodging" for="tripItemAddress">
+              <span>地址</span>
+              <input id="tripItemAddress" name="address" maxlength="160" autocomplete="street-address" />
+            </label>
+
+            <label class="trip-form-field trip-form-field-wide" for="tripItemNote">
+              <span>备注</span>
+              <textarea id="tripItemNote" name="note" rows="3" maxlength="500"></textarea>
+            </label>
+          </div>
+        </div>
+
+        <footer class="trip-dialog-actions">
+          <button id="tripItemCancelBtn" class="dialog-button secondary" type="button">取消</button>
+          <button id="tripItemSubmitBtn" class="dialog-button primary" type="submit">保存</button>
+        </footer>
+      </form>
+    </dialog>
+
     <script src="./vendor/leaflet/leaflet.js?v=1.9.4"></script>
     <script type="module" src="./app.js?v=calendar-planner-1"></script>
   </body>
