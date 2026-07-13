@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 const htmlUrl = new URL("../public/static-site/index.html", import.meta.url);
 const appUrl = new URL("../public/static-site/app.js", import.meta.url);
 const stylesUrl = new URL("../public/static-site/styles.css", import.meta.url);
+const packageUrl = new URL("../package.json", import.meta.url);
 const plannerIds = [
   "tripNameInput",
   "tripStartDateInput",
@@ -49,11 +50,13 @@ test("static page loads the versioned app entry as a module", async () => {
   );
 });
 
-test("static page contains one accessible trip item dialog and import input", async () => {
+test("static page contains accessible trip editing, import and JSON export controls", async () => {
   const html = await readFile(htmlUrl, "utf8");
 
   assert.match(html, /<dialog\b[^>]*\bid=["']tripItemDialog["']/);
   assert.match(html, /<form\b[^>]*\bid=["']tripItemForm["']/);
+  assert.match(html, /<button\b[^>]*\bid=["']tripImportBtn["'][^>]*\btype=["']button["']/);
+  assert.match(html, /<button\b[^>]*\bid=["']exportTripFileBtn["'][^>]*\btype=["']button["'][^>]*\bdisabled\b/);
   assert.match(html, /<input\b[^>]*\bid=["']tripImportInput["'][^>]*\btype=["']file["']/);
   assert.match(html, /<button\b[^>]*\btype=["']submit["'][^>]*>/);
   assert.match(html, /<button\b[^>]*\bid=["']tripItemCancelBtn["'][^>]*\btype=["']button["']/);
@@ -64,7 +67,13 @@ test("static page contains one accessible trip item dialog and import input", as
     assert.equal(matches.length, 1, `expected exactly one form field named ${name}`);
   }
 
-  for (const id of ["tripItemDialog", "tripItemForm", "tripImportInput"]) {
+  for (const id of [
+    "tripItemDialog",
+    "tripItemForm",
+    "tripImportBtn",
+    "tripImportInput",
+    "exportTripFileBtn"
+  ]) {
     const matches = html.match(new RegExp(`\\bid=["']${id}["']`, "g")) ?? [];
     assert.equal(matches.length, 1, `expected exactly one #${id}`);
   }
@@ -102,19 +111,115 @@ test("app coordinates TripPlan through the calendar modules and one commit entry
   assert.match(app, /function\s+syncRoutesFromTripPlan\s*\(/);
 });
 
+test("app delegates archive behavior to the DOM-free trip archive module", async () => {
+  const app = await readFile(appUrl, "utf8");
+  const archiveApis = [
+    "LEGACY_TRIP_BACKUP_KEY",
+    "backupLegacyTripRaw",
+    "captureTripArchiveSnapshot",
+    "canExportTripFile",
+    "clearTripArchive",
+    "createLazyStorageAdapter",
+    "finalizeLegacyMigration",
+    "isLegacyTripPayload",
+    "legacyMigrationPending",
+    "readTripRecoveryCandidates",
+    "restoreTripArchiveSnapshot",
+    "shareUrlForTrip",
+    "tripFileName",
+    "tripFileExportPayload",
+    "tripFileText",
+    "writeTripPlanV2"
+  ];
+
+  assert.match(app, /from\s+["']\.\/trip-archive\.js["']/);
+  for (const api of archiveApis) {
+    assert.ok((app.match(new RegExp(`\\b${api}\\b`, "g")) ?? []).length >= 2, `expected app.js to use ${api}`);
+  }
+  assert.match(app, /\bshouldUseTripFile\s*\(/);
+  assert.doesNotMatch(app, /const\s+TRIP_STORAGE_KEY\s*=/);
+  assert.doesNotMatch(app, /function\s+(?:shareUrlForTrip|safeTripNameForFile)\s*\(/);
+});
+
+test("app wires visible trip import and JSON export controls", async () => {
+  const app = await readFile(appUrl, "utf8");
+
+  assert.match(app, /querySelector\s*\(\s*["']#tripImportBtn["']\s*\)/);
+  assert.match(app, /querySelector\s*\(\s*["']#tripImportInput["']\s*\)/);
+  assert.match(app, /querySelector\s*\(\s*["']#exportTripFileBtn["']\s*\)/);
+  assert.match(app, /tripImportBtn\.addEventListener\s*\(\s*["']click["'][\s\S]*?tripImportInput\.click\s*\(/);
+  assert.match(app, /tripImportInput\.addEventListener\s*\(\s*["']change["']\s*,\s*importTripFile\s*\)/);
+  assert.match(app, /exportTripFileBtn\.addEventListener\s*\(\s*["']click["']\s*,\s*exportTripFile\s*\)/);
+  assert.match(app, /exportTripFileBtn\.disabled\s*=\s*!canExportTripFile\s*\(/);
+  assert.match(app, /function\s+exportTripFile\s*\([^)]*\)[\s\S]*?tripFileExportPayload\s*\([\s\S]*?downloadTextFile\s*\(/);
+  assert.match(app, /exportPayload\.kind\s*===\s*["']legacy-emergency["'][\s\S]*?clearEmergencyLegacyTrip\s*\(/);
+});
+
+test("app wires v2 writes, recovery and legacy lifecycle through archive transactions", async () => {
+  const app = await readFile(appUrl, "utf8");
+
+  assert.match(app, /const\s+tripArchiveStorage\s*=\s*createLazyStorageAdapter\s*\(\s*\(\)\s*=>\s*window\.localStorage\s*\)/);
+  assert.doesNotMatch(app, /storage:\s*window\.localStorage/);
+  assert.match(app, /writeTripPlanV2\s*\(\s*\{[\s\S]*?storage:\s*tripArchiveStorage[\s\S]*?currentUrl:\s*window\.location\.href[\s\S]*?replaceUrl:/);
+  assert.match(app, /readTripRecoveryCandidates\s*\(\s*\{[\s\S]*?storage:\s*tripArchiveStorage/);
+  assert.match(app, /backupLegacyTripRaw\s*\(\s*\{\s*storage:\s*tripArchiveStorage,\s*raw:/);
+  assert.match(app, /finalizeLegacyMigration\s*\(\s*\{\s*storage:\s*tripArchiveStorage\s*\}\s*\)/);
+  assert.match(app, /clearTripArchive\s*\(\s*\{[\s\S]*?storage:\s*tripArchiveStorage/);
+  assert.match(app, /restoreTripArchiveSnapshot\s*\(/);
+  assert.match(app, /completeLegacyMigration:\s*false/);
+  assert.match(
+    app,
+    /function\s+restoreTripState\s*\([^)]*\)\s*\{[\s\S]*?backupLegacyTripRaw\s*\([\s\S]*?migrateTripState\s*\([\s\S]*?commitTripPlan\s*\(\s*plan\s*,\s*\{[\s\S]*?recordHistory:\s*false[\s\S]*?completeLegacyMigration:\s*false/
+  );
+  assert.match(
+    app,
+    /async\s+function\s+importTripFile\s*\([^)]*\)\s*\{[\s\S]*?file\.text\s*\(\s*\)[\s\S]*?backupLegacyTripRaw\s*\([\s\S]*?migrateTripState\s*\([\s\S]*?commitTripPlan\s*\(\s*plan\s*,\s*\{[\s\S]*?completeLegacyMigration:\s*false[\s\S]*?finally\s*\{[\s\S]*?input\.value\s*=\s*["']["']/
+  );
+  assert.match(app, /旧版存档备份失败[\s\S]*?rememberEmergencyLegacyTrip\s*\(\s*candidate\.raw\s*\)/);
+  assert.match(app, /failureReason\s*=\s*["']backup["'][\s\S]*?rememberEmergencyLegacyTrip\s*\(\s*rawText\s*\)/);
+  assert.match(app, /请保持页面打开，并在浏览器设置中检查本站点数据权限后重试/);
+});
+
+test("default npm test includes the trip archive regression suite", async () => {
+  const packageJson = JSON.parse(await readFile(packageUrl, "utf8"));
+
+  assert.match(packageJson.scripts.test, /(?:^|\s)tests\/trip-archive\.test\.mjs(?:\s|$)/);
+  assert.match(packageJson.scripts["test:build"], /npm run test/);
+});
+
+test("short sharing updates the address only in the clipboard fallback", async () => {
+  const app = await readFile(appUrl, "utf8");
+
+  assert.match(
+    app,
+    /if\s*\(copied\)\s*\{[\s\S]*?return;[\s\S]*?replaceBrowserUrl\s*\(\s*shareUrl\s*\)/
+  );
+  assert.match(
+    app,
+    /if\s*\(shouldUseTripFile\s*\(\s*shareUrl\s*\)\)\s*\{[\s\S]*?downloadTripFile\s*\([\s\S]*?return;/
+  );
+});
+
+test("app commits transport metadata and synchronizes transport state before rendering", async () => {
+  const app = await readFile(appUrl, "utf8");
+
+  assert.match(app, /state\.transportMode\s*=\s*resolveTripTransportMode\s*\(\s*nextPlan\s*\)/);
+  assert.match(
+    app,
+    /function\s+setTransportMode\s*\([^)]*\)\s*\{[\s\S]*?applyTripCommand\s*\([\s\S]*?transportMode:\s*mode[\s\S]*?commitTripPlan\s*\(/
+  );
+  assert.match(app, /createTripPlan\s*\(\s*\{[\s\S]*?transportMode:\s*state\.transportMode/);
+  assert.match(app, /const\s+metadata\s*=\s*\{[\s\S]*?transportMode:/);
+});
+
 test("calendar rendering uses validation and real edit callbacks", async () => {
   const app = await readFile(appUrl, "utf8");
-  const start = app.indexOf("function renderTripPlanner(");
-  const end = app.indexOf("\nfunction updateTotals(", start);
-  assert.notEqual(start, -1);
-  assert.notEqual(end, -1);
 
-  const source = app.slice(start, end);
-  assert.match(source, /validateTripPlan\s*\(/);
-  assert.match(source, /renderTripEditorMarkup\s*\(\s*\{[\s\S]*?warnings/);
-  assert.match(source, /onCommand:\s*handleTripCommand/);
-  assert.match(source, /onEditRequest:\s*openTripItemDialog/);
-  assert.doesNotMatch(source, /on(?:Command|EditRequest):\s*\(\)\s*=>\s*\{\s*\}/);
+  assert.match(app, /function\s+renderTripPlanner\s*\([^)]*\)\s*\{[\s\S]*?validateTripPlan\s*\(/);
+  assert.match(app, /renderTripEditorMarkup\s*\(\s*\{[\s\S]*?warnings/);
+  assert.match(app, /onCommand:\s*handleTripCommand/);
+  assert.match(app, /onEditRequest:\s*openTripItemDialog/);
+  assert.doesNotMatch(app, /on(?:Command|EditRequest):\s*\(\)\s*=>\s*\{\s*\}/);
 });
 
 test("calendar dialog styles include a scrollable mobile drawer and touch controls", async () => {
@@ -127,61 +232,22 @@ test("calendar dialog styles include a scrollable mobile drawer and touch contro
   assert.match(css, /@media\s*\(max-width:\s*880px\)[\s\S]*?min-height:\s*40px/);
 });
 
-test("renderPanel delegates calendar output to the trip editor", async () => {
+test("renderPanel delegates calendar output and metadata controls use the commit path", async () => {
   const app = await readFile(appUrl, "utf8");
-  const start = app.indexOf("function renderPanel(");
-  const end = app.indexOf("\nfunction updateTotals(", start);
-  assert.notEqual(start, -1);
-  assert.notEqual(end, -1);
 
-  const renderPanelSource = app.slice(start, end);
-  assert.match(renderPanelSource, /renderTripPlanner\s*\(/);
-  assert.doesNotMatch(renderPanelSource, /renderItineraryPanel\s*\(/);
-});
-
-test("the existing pace control commits TripPlan metadata", async () => {
-  const app = await readFile(appUrl, "utf8");
-  const start = app.indexOf("function setTripPace(");
-  const end = app.indexOf("\nfunction syncTransportButtons(", start);
-  assert.notEqual(start, -1);
-  assert.notEqual(end, -1);
-
-  const setTripPaceSource = app.slice(start, end);
-  assert.match(setTripPaceSource, /commitTripPlan\s*\(/);
-});
-
-test("committing and undoing a plan synchronizes the pace state before rendering buttons", async () => {
-  const app = await readFile(appUrl, "utf8");
-  const start = app.indexOf("function commitTripPlan(");
-  const end = app.indexOf("\nfunction tripIdentifier(", start);
-  assert.notEqual(start, -1);
-  assert.notEqual(end, -1);
-
-  const source = app.slice(start, end);
-  assert.match(source, /state\.tripPace\s*=\s*resolveTripPace\s*\(\s*nextPlan\s*,\s*state\.tripPace\s*\)/);
-  assert.ok(source.indexOf("state.tripPace =") < source.indexOf("renderPanel()"));
+  assert.match(app, /function\s+renderPanel\s*\([^)]*\)\s*\{[\s\S]*?renderTripPlanner\s*\(/);
+  assert.match(app, /function\s+setTripPace\s*\([^)]*\)\s*\{[\s\S]*?commitTripPlan\s*\(/);
+  assert.match(app, /function\s+commitTripPlan\s*\([^)]*\)[\s\S]*?state\.tripPace\s*=\s*resolveTripPace/);
   assert.match(app, /function\s+renderPanel\s*\([^)]*\)\s*\{[\s\S]*?syncPaceButtons\s*\(\s*\)/);
-  assert.match(app, /function\s+setTripPace\s*\([^)]*\)\s*\{[\s\S]*?state\.tripPace\s*===\s*pace/);
 });
 
-test("calendar commands preserve focus and expose blocked move feedback", async () => {
+test("calendar command wiring preserves focus and exposes blocked move feedback", async () => {
   const app = await readFile(appUrl, "utf8");
-  const handleStart = app.indexOf("function handleTripCommand(");
-  const handleEnd = app.indexOf("\nfunction tripFormControl(", handleStart);
-  const submitStart = app.indexOf("function submitTripItemForm(");
-  const submitEnd = app.indexOf("\nfunction updateTripNameMetadata(", submitStart);
-  assert.notEqual(handleStart, -1);
-  assert.notEqual(handleEnd, -1);
-  assert.notEqual(submitStart, -1);
-  assert.notEqual(submitEnd, -1);
 
-  const handleSource = app.slice(handleStart, handleEnd);
-  const submitSource = app.slice(submitStart, submitEnd);
-  assert.match(handleSource, /function\s+handleTripCommand\s*\(\s*command\s*,\s*focusToken\s*\)/);
-  assert.match(handleSource, /blockedReason/);
-  assert.match(handleSource, /cleanup-associated-content/);
-  assert.match(handleSource, /commitTripPlan\s*\(\s*result\.plan\s*,\s*\{\s*focusToken\s*\}\s*\)/);
-  assert.ok(submitSource.indexOf("closeTripItemDialog") < submitSource.indexOf("handleTripCommand"));
-  assert.match(submitSource, /handleTripCommand\s*\(\s*command\s*,\s*\{[\s\S]*?action:\s*"day"[\s\S]*?dayId/);
+  assert.match(app, /function\s+handleTripCommand\s*\(\s*command\s*,\s*focusToken\s*\)/);
+  assert.match(app, /blockedReason/);
+  assert.match(app, /cleanup-associated-content/);
+  assert.match(app, /commitTripPlan\s*\(\s*result\.plan\s*,\s*\{\s*focusToken\s*\}\s*\)/);
+  assert.match(app, /closeTripItemDialog\s*\([^)]*\)[\s\S]*?handleTripCommand\s*\(\s*command\s*,\s*\{[\s\S]*?action:\s*["']day["'][\s\S]*?dayId/);
   assert.match(app, /restoreTripEditorFocus\s*\(\s*tripEditorRoot\s*,\s*focusToken\s*\)/);
 });

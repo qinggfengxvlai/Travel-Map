@@ -2,6 +2,7 @@ export const TRIP_PLAN_VERSION = 2;
 export const TRIP_STORAGE_KEY = "route-studio-trip-v2";
 export const LEGACY_TRIP_STORAGE_KEY = "route-studio-trip-v1";
 const VALID_TRIP_PACES = new Set(["relaxed", "standard", "compact"]);
+const VALID_TRANSPORT_MODES = new Set(["highspeed", "train"]);
 
 function defaultIdFactory(prefix) {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -23,6 +24,7 @@ export function createTripPlan({
   name = "我的旅行",
   startDate = null,
   pace = "standard",
+  transportMode = "highspeed",
   idFactory = defaultIdFactory
 } = {}) {
   const day = blankDay(idFactory);
@@ -37,6 +39,7 @@ export function createTripPlan({
     name,
     startDate,
     pace,
+    transportMode: VALID_TRANSPORT_MODES.has(transportMode) ? transportMode : "highspeed",
     days: placeIds.length ? [day] : [],
     savedAt: new Date().toISOString()
   };
@@ -102,6 +105,11 @@ export function routePlaceIds(plan) {
 export function resolveTripPace(plan, fallback = "standard") {
   const safeFallback = VALID_TRIP_PACES.has(fallback) ? fallback : "standard";
   return VALID_TRIP_PACES.has(plan?.pace) ? plan.pace : safeFallback;
+}
+
+export function resolveTripTransportMode(plan, fallback = "highspeed") {
+  const safeFallback = VALID_TRANSPORT_MODES.has(fallback) ? fallback : "highspeed";
+  return VALID_TRANSPORT_MODES.has(plan?.transportMode) ? plan.transportMode : safeFallback;
 }
 
 function dayHasPlace(day, placeId) {
@@ -520,6 +528,9 @@ export function normalizeTripPlan(data, { idFactory = defaultIdFactory } = {}) {
   const pace = VALID_TRIP_PACES.has(data.pace)
     ? data.pace
     : "standard";
+  const transportMode = VALID_TRANSPORT_MODES.has(data.transportMode)
+    ? data.transportMode
+    : "highspeed";
   const name = typeof data.name === "string" ? data.name.slice(0, 60) : "我的旅行";
   let hasPreviousEntry = false;
   let previousPlaceId = null;
@@ -561,6 +572,7 @@ export function normalizeTripPlan(data, { idFactory = defaultIdFactory } = {}) {
     name,
     startDate: validStartDate(data.startDate),
     pace,
+    transportMode,
     days,
     savedAt: normalizedSavedAt(data.savedAt)
   };
@@ -601,6 +613,7 @@ export function migrateTripState(data, options = {}) {
     idFactory,
     metadata: {
       pace: VALID_TRIP_PACES.has(snapshot.tripPace) ? snapshot.tripPace : "standard",
+      transportMode: VALID_TRANSPORT_MODES.has(snapshot.transportMode) ? snapshot.transportMode : "highspeed",
       name: "我的旅行"
     }
   });
@@ -955,10 +968,15 @@ export function applyTripCommand(plan, command, { idFactory = defaultIdFactory, 
       ? command.patch
       : null;
     const updates = {};
-    ["name", "startDate", "pace"].forEach((key) => {
+    ["name", "startDate", "pace", "transportMode"].forEach((key) => {
       if (patch && Object.hasOwn(patch, key)) updates[key] = patch[key];
       else if (Object.hasOwn(command, key)) updates[key] = command[key];
     });
+    if (Object.hasOwn(updates, "transportMode")) {
+      updates.transportMode = VALID_TRANSPORT_MODES.has(updates.transportMode)
+        ? updates.transportMode
+        : "highspeed";
+    }
     const changedKeys = Object.keys(updates).filter((key) => !Object.is(plan[key], updates[key]));
     if (!changedKeys.length) return { plan, requiresConfirmation: false, changed: false };
     changedKeys.forEach((key) => {

@@ -1,19 +1,46 @@
 import {
+  LEGACY_TRIP_STORAGE_KEY,
+  TRIP_PLAN_VERSION,
+  TRIP_STORAGE_KEY,
   applyTripCommand,
   autoScheduleTrip,
   createTripPlan,
   dayDate,
+  migrateTripState,
+  normalizeTripPlan,
   reconcileRoutePlaces,
   resolveTripPace,
+  resolveTripTransportMode,
   routePlaceIds,
+  shouldUseTripFile,
   validateTripPlan
 } from "./trip-plan.js";
+import {
+  LEGACY_TRIP_BACKUP_KEY,
+  backupLegacyTripRaw,
+  canExportTripFile,
+  captureTripArchiveSnapshot,
+  clearTripArchive,
+  createLazyStorageAdapter,
+  finalizeLegacyMigration,
+  isLegacyTripPayload,
+  legacyMigrationPending,
+  readTripRecoveryCandidates,
+  restoreTripArchiveSnapshot,
+  shareUrlForTrip,
+  tripFileExportPayload,
+  tripFileName,
+  tripFileText,
+  writeTripPlanV2
+} from "./trip-archive.js";
 import {
   commandForTripItemForm,
   mountTripEditor,
   renderTripEditorMarkup,
   restoreTripEditorFocus
 } from "./trip-editor.js";
+
+const tripArchiveStorage = createLazyStorageAdapter(() => window.localStorage);
 
 const labels = {
   chooseStart: "\u9009\u62e9\u51fa\u53d1\u57ce\u5e02",
@@ -83,8 +110,10 @@ const CITY_CLICK_DELAY_MS = 180;
 const DAILY_TRAVEL_LIMIT_SECONDS = 4 * 60 * 60;
 const MAX_DAILY_PLACES = 3;
 const CITY_PLAY_WINDOW_SECONDS = 10 * 60 * 60;
-const TRIP_STORAGE_KEY = "route-studio-trip-v1";
 const DEFAULT_TRIP_NAME = "\u6211\u7684\u65c5\u884c";
+let legacyTripBackupPending = false;
+let lastTripPersistenceResult = { stored: false, hashCleared: true };
+let emergencyLegacyTripRaw = null;
 
 const landmarkCatalog = {
   beijing: [
@@ -497,6 +526,9 @@ const clearBtn = document.querySelector("#clearBtn");
 const resetViewBtn = document.querySelector("#resetViewBtn");
 const saveTripBtn = document.querySelector("#saveTripBtn");
 const shareTripBtn = document.querySelector("#shareTripBtn");
+const tripImportBtn = document.querySelector("#tripImportBtn");
+const tripImportInput = document.querySelector("#tripImportInput");
+const exportTripFileBtn = document.querySelector("#exportTripFileBtn");
 const exportBtn = document.querySelector("#exportBtn");
 const citySearch = document.querySelector("#citySearch");
 const clearSearchBtn = document.querySelector("#clearSearchBtn");
@@ -1285,7 +1317,8 @@ function syncRoutesFromTripPlan() {
 function commitTripPlan(nextPlan, {
   recordHistory = true,
   message = "\u5df2\u81ea\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002",
-  focusToken = null
+  focusToken = null,
+  completeLegacyMigration = true
 } = {}) {
   if (recordHistory && state.tripPlan && state.tripPlan !== nextPlan) {
     state.tripHistory.push(structuredClone(state.tripPlan));
@@ -1293,6 +1326,7 @@ function commitTripPlan(nextPlan, {
   state.tripHistory = state.tripHistory.slice(-20);
   state.tripPlan = nextPlan;
   state.tripPace = resolveTripPace(nextPlan, state.tripPace);
+  state.transportMode = resolveTripTransportMode(nextPlan);
   syncRoutesFromTripPlan();
   renderRoutes();
   renderPanel();
@@ -1300,7 +1334,9 @@ function commitTripPlan(nextPlan, {
     restoreTripEditorFocus(tripEditorRoot, focusToken);
     window.requestAnimationFrame(() => restoreTripEditorFocus(tripEditorRoot, focusToken));
   }
-  persistTripState(message);
+  const persisted = persistTripState(message);
+  if (persisted && completeLegacyMigration) finalizeLegacyTripBackup(message);
+  return persisted;
 }
 
 function tripIdentifier(value) {
@@ -1589,7 +1625,8 @@ function autoScheduleCurrentTrip() {
   const metadata = {
     name: typeof plan.name === "string" && plan.name.trim() ? plan.name : DEFAULT_TRIP_NAME,
     startDate: plan.startDate || null,
-    pace: plan.pace || state.tripPace
+    pace: plan.pace || state.tripPace,
+    transportMode: resolveTripTransportMode(plan)
   };
   const nextPlan = autoScheduleTrip({
     placeIds,
@@ -1645,9 +1682,7 @@ function renderPanel() {
   emptyState.hidden = state.routes.length > 0;
   undoBtn.disabled = state.routes.length === 0;
   clearBtn.disabled = state.routes.length === 0 && !state.selectedCityId;
-  const hasPlan = Boolean(state.tripPlan);
-  if (saveTripBtn) saveTripBtn.disabled = !hasPlan;
-  if (shareTripBtn) shareTripBtn.disabled = !hasPlan;
+  syncTripArchiveControls();
   exportBtn.disabled = state.routes.length === 0;
   cityCount.textContent = String(state.cities.length);
   if (state.viewMode === "city") {
@@ -2038,140 +2073,506 @@ function uniqueByName(values) {
   });
 }
 
-function serializedTripState() {
-  return {
-    transportMode: state.transportMode,
-    tripPace: state.tripPace,
-    selectedCityId: state.selectedCityId,
-    routes: state.routes.map((route) => ({
-      from: route.from,
-      to: route.to,
-      transportMode: route.transportMode || state.transportMode
-    })),
-    savedAt: new Date().toISOString()
-  };
+function hasSerializableTrip() {
+  return Boolean(state.tripPlan);
 }
 
-function hasSerializableTrip() {
-  return Boolean(state.selectedCityId || state.routes.length);
+function syncTripArchiveControls() {
+  const hasPlan = hasSerializableTrip();
+  if (saveTripBtn) saveTripBtn.disabled = !hasPlan;
+  if (shareTripBtn) shareTripBtn.disabled = !hasPlan;
+  if (exportTripFileBtn) {
+    exportTripFileBtn.disabled = !canExportTripFile({
+      plan: state.tripPlan,
+      emergencyLegacyRaw: emergencyLegacyTripRaw
+    });
+  }
+}
+
+function rememberEmergencyLegacyTrip(raw) {
+  if (!canExportTripFile({ emergencyLegacyRaw: raw })) return false;
+  emergencyLegacyTripRaw = raw;
+  syncTripArchiveControls();
+  return true;
+}
+
+function clearEmergencyLegacyTrip() {
+  emergencyLegacyTripRaw = null;
+  syncTripArchiveControls();
+}
+
+function archiveFailureGuidance() {
+  if (canExportTripFile({
+    plan: state.tripPlan,
+    emergencyLegacyRaw: emergencyLegacyTripRaw
+  })) {
+    return "请点击页面上的“导出行程”保存文件后重试。";
+  }
+  return "请保持页面打开，并在浏览器设置中检查本站点数据权限后重试。";
+}
+
+function replaceBrowserUrl(nextUrl) {
+  window.history.replaceState(null, "", nextUrl);
 }
 
 function persistTripState(message = "\u5df2\u81ea\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002") {
   if (!hasSerializableTrip()) {
-    clearPersistedTripState();
-    return;
+    return clearPersistedTripState();
   }
-  try {
-    window.localStorage.setItem(TRIP_STORAGE_KEY, JSON.stringify(serializedTripState()));
-    updateArchiveStatus(message, "success");
-  } catch (error) {
-    updateArchiveStatus("\u672c\u673a\u5b58\u50a8\u4e0d\u53ef\u7528\uff0c\u8bf7\u4f7f\u7528\u590d\u5236\u94fe\u63a5\u3002", "error");
-  }
-}
-
-function clearPersistedTripState() {
-  try {
-    window.localStorage.removeItem(TRIP_STORAGE_KEY);
-  } catch (error) {
-    // Local storage can be disabled; clearing is best-effort.
-  }
-  clearTripHash();
-  updateArchiveStatus("\u8def\u7ebf\u5df2\u6e05\u7a7a\uff0c\u672c\u673a\u5b58\u6863\u5df2\u79fb\u9664\u3002", "success");
-}
-
-function tripStateFromHash() {
-  const params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-  const encoded = params.get("trip");
-  if (!encoded) return null;
-  try {
-    return JSON.parse(decodeURIComponent(encoded));
-  } catch (error) {
-    updateArchiveStatus("\u94fe\u63a5\u91cc\u7684\u884c\u7a0b\u65e0\u6cd5\u8bfb\u53d6\u3002", "error");
-    return null;
-  }
-}
-
-function tripStateFromStorage() {
-  try {
-    const saved = window.localStorage.getItem(TRIP_STORAGE_KEY);
-    return saved ? JSON.parse(saved) : null;
-  } catch (error) {
-    return null;
-  }
-}
-
-function restoreTripState() {
-  const sharedTripState = tripStateFromHash();
-  const data = sharedTripState || tripStateFromStorage();
-  if (!data) {
-    updateArchiveStatus("\u8def\u7ebf\u4f1a\u81ea\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002");
+  lastTripPersistenceResult = writeTripPlanV2({
+    storage: tripArchiveStorage,
+    plan: state.tripPlan,
+    currentUrl: window.location.href,
+    replaceUrl: replaceBrowserUrl
+  });
+  if (!lastTripPersistenceResult.stored) {
+    updateArchiveStatus("本机存储失败，当前行程仍保留在本页；请立即点击页面上的“导出行程”保存文件备份。", "error");
     return false;
   }
-
-  const restoredRoutes = Array.isArray(data.routes)
-    ? data.routes
-      .filter((route) => route && placeById(route.from) && placeById(route.to))
-      .map((route, index) => ({
-        id: index + 1,
-        from: route.from,
-        to: route.to,
-        status: "loading",
-        distance: null,
-        duration: null,
-        fallback: false,
-        error: null,
-        transportMode: transportProfiles[route.transportMode] ? route.transportMode : (data.transportMode || state.transportMode),
-        transportLabel: transportProfile(route.transportMode || data.transportMode || state.transportMode).label
-      }))
-    : [];
-
-  const selected = restoredRoutes[restoredRoutes.length - 1]?.to ||
-    (data.selectedCityId && placeById(data.selectedCityId) ? data.selectedCityId : null);
-  if (!selected && !restoredRoutes.length) return false;
-
-  state.transportMode = transportProfiles[data.transportMode] ? data.transportMode : state.transportMode;
-  state.tripPace = tripPaceProfiles[data.tripPace] ? data.tripPace : state.tripPace;
-  state.routes = restoredRoutes;
-  state.selectedCityId = selected;
-  state.nextRouteId = restoredRoutes.length + 1;
-  recalculateRoutesForTransport();
-  syncTransportButtons();
-  syncPaceButtons();
-  const restoredPlaceIds = restoredRoutes.length
-    ? [restoredRoutes[0].from, ...restoredRoutes.map((route) => route.to)]
-    : [selected];
-  const plan = createTripPlan({ placeIds: restoredPlaceIds, pace: state.tripPace });
-  commitTripPlan(plan, {
-    recordHistory: false,
-    message: sharedTripState
-      ? "\u5df2\u4ece\u5206\u4eab\u94fe\u63a5\u6062\u590d\u884c\u7a0b\u3002"
-      : "\u5df2\u4ece\u672c\u673a\u5b58\u6863\u6062\u590d\u884c\u7a0b\u3002"
-  });
+  if (!lastTripPersistenceResult.hashCleared) {
+    const savedMessage = String(message || "行程已保存").replace(/[。；\s]+$/g, "");
+    updateArchiveStatus(`${savedMessage}；但地址栏中的旧分享快照未能清理，请导出行程文件并避免刷新后使用旧快照。`, "error");
+    return true;
+  }
+  updateArchiveStatus(message, "success");
   return true;
 }
 
-function shareUrlForTrip() {
-  const url = new URL(window.location.href);
-  url.hash = `trip=${encodeURIComponent(JSON.stringify(serializedTripState()))}`;
-  return url.toString();
+function finalizeLegacyTripBackup(message) {
+  if (!legacyTripBackupPending) return true;
+  const savedMessage = String(message || "行程已保存").replace(/[。；\s]+$/g, "");
+  const result = finalizeLegacyMigration({ storage: tripArchiveStorage });
+  legacyTripBackupPending = !result.ok;
+  if (!result.ok) {
+    const hashWarning = lastTripPersistenceResult.hashCleared ? "" : "，且地址栏旧分享快照未能清理";
+    updateArchiveStatus(`${savedMessage}；但旧版 v1 存档或迁移备份未完全清理${hashWarning}。`, "error");
+    return false;
+  }
+  if (!lastTripPersistenceResult.hashCleared) {
+    updateArchiveStatus(`${savedMessage}；旧版 v1 存档与迁移备份已清理，但地址栏旧分享快照未能清理。`, "error");
+    return true;
+  }
+  updateArchiveStatus(`${savedMessage}；旧版 v1 存档与迁移备份已清理。`, "success");
+  return true;
+}
+
+function clearPersistedTripState() {
+  clearEmergencyLegacyTrip();
+  const result = clearTripArchive({
+    storage: tripArchiveStorage,
+    currentUrl: window.location.href,
+    replaceUrl: replaceBrowserUrl
+  });
+  legacyTripBackupPending = result.failedKeys.some((key) => (
+    key === LEGACY_TRIP_STORAGE_KEY || key === LEGACY_TRIP_BACKUP_KEY
+  ));
+  if (result.ok) {
+    updateArchiveStatus("行程已清空，v2、旧版与迁移备份均已移除。", "success");
+    return true;
+  }
+  updateArchiveStatus("行程已清空，但部分本机存档或分享地址未能移除；请检查浏览器站点数据。", "error");
+  return false;
+}
+
+function isTripStateRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function prepareTripMigration(data, { allowLegacy = false } = {}) {
+  if (!isTripStateRecord(data)) throw new TypeError("行程文件格式无效");
+  const hasVersion = Object.hasOwn(data, "version");
+  const isLegacy = !hasVersion || data.version === 1;
+  if (isLegacy && !allowLegacy) throw new TypeError("分享链接不是 v2 行程");
+
+  if (!isLegacy) {
+    if (data.version !== TRIP_PLAN_VERSION) throw new TypeError("不支持的行程版本");
+    return {
+      data,
+      isLegacy: false,
+      paceProfile: tripPaceProfile()
+    };
+  }
+
+  if (!isLegacyTripPayload(data)) throw new TypeError("旧版行程格式无效");
+  const routes = (Array.isArray(data.routes) ? data.routes : [])
+    .filter((route) => {
+      if (!isTripStateRecord(route)) return false;
+      const from = tripIdentifier(route.from);
+      const to = tripIdentifier(route.to);
+      return Boolean(from && to && placeById(from) && placeById(to));
+    })
+    .map((route) => ({
+      ...route,
+      from: tripIdentifier(route.from),
+      to: tripIdentifier(route.to)
+    }));
+  const selectedCityId = tripIdentifier(data.selectedCityId);
+  const pace = tripPaceProfiles[data.tripPace] ? data.tripPace : state.tripPace;
+  return {
+    data: {
+      ...data,
+      routes,
+      selectedCityId: selectedCityId && placeById(selectedCityId) ? selectedCityId : null
+    },
+    isLegacy: true,
+    paceProfile: tripPaceProfile(pace)
+  };
+}
+
+function assertTripPlanCanRender(plan, { isLegacy = false } = {}) {
+  const placeIds = routePlaceIds(plan);
+  if (placeIds.some((placeId) => !placeById(placeId))) {
+    throw new TypeError("行程包含当前地图无法识别的地点");
+  }
+  if (isLegacy && !placeIds.length) {
+    throw new TypeError("旧版行程没有可恢复的地点");
+  }
+  return plan;
+}
+
+function captureTripImportSnapshot() {
+  return {
+    tripPlan: state.tripPlan,
+    tripHistory: state.tripHistory.slice(),
+    transportMode: state.transportMode,
+    tripPace: state.tripPace,
+    routes: state.routes,
+    selectedCityId: state.selectedCityId,
+    nextRouteId: state.nextRouteId,
+    archiveSnapshot: captureTripArchiveSnapshot({ storage: tripArchiveStorage }),
+    legacyTripBackupPending,
+    lastTripPersistenceResult,
+    emergencyLegacyTripRaw
+  };
+}
+
+function rollbackTripImportSnapshot(snapshot, {
+  restorePlan = false,
+  restoreV2 = false,
+  restoreBackup = false
+} = {}) {
+  let restored = true;
+  legacyTripBackupPending = snapshot.legacyTripBackupPending;
+  lastTripPersistenceResult = snapshot.lastTripPersistenceResult;
+  emergencyLegacyTripRaw = snapshot.emergencyLegacyTripRaw;
+  const keys = [
+    ...(restoreV2 ? [TRIP_STORAGE_KEY] : []),
+    ...(restoreBackup ? [LEGACY_TRIP_BACKUP_KEY] : [])
+  ];
+  if (keys.length) {
+    const storageResult = restoreTripArchiveSnapshot({
+      storage: tripArchiveStorage,
+      snapshot: snapshot.archiveSnapshot,
+      keys
+    });
+    restored = storageResult.ok && restored;
+  }
+  if (restorePlan) {
+    state.tripPlan = snapshot.tripPlan;
+    state.tripHistory = snapshot.tripHistory.slice();
+    state.transportMode = snapshot.transportMode;
+    state.tripPace = snapshot.tripPace;
+    state.routes = snapshot.routes;
+    state.selectedCityId = snapshot.selectedCityId;
+    state.nextRouteId = snapshot.nextRouteId;
+    try {
+      syncTransportButtons();
+      syncPaceButtons();
+      renderRoutes();
+      renderPanel();
+    } catch (error) {
+      restored = false;
+    }
+  }
+  syncTripArchiveControls();
+  return restored;
+}
+
+function restoredTripMessage(source, failures) {
+  const fallback = failures.size ? `${[...failures].join("、")}不可用；` : "";
+  if (source === "hash") return `${fallback}已从分享链接恢复 v2 行程并保存到本机。`;
+  if (source === "legacy") {
+    return `${fallback}已迁移旧版行程并保存为 v2；原始备份会在第一次有效编辑保存后清理。`;
+  }
+  return `${fallback}已从本机 v2 存档恢复行程。`;
+}
+
+function restoreTripState() {
+  const failures = new Set();
+  try {
+    legacyTripBackupPending = legacyMigrationPending({ storage: tripArchiveStorage });
+  } catch (error) {
+    legacyTripBackupPending = false;
+    failures.add("旧版迁移状态读取失败");
+  }
+  const candidates = readTripRecoveryCandidates({
+    storage: tripArchiveStorage,
+    currentUrl: window.location.href
+  });
+
+  for (const candidate of candidates) {
+    if (candidate.error) {
+      failures.add(`${candidate.label}读取失败`);
+      continue;
+    }
+
+    const previousPending = legacyTripBackupPending;
+    let legacyArchiveSnapshot = null;
+    let backupTouched = false;
+    let commitAttempted = false;
+    try {
+      const data = JSON.parse(candidate.raw);
+      const prepared = prepareTripMigration(data, { allowLegacy: candidate.allowLegacy });
+      if (candidate.requireLegacy && !prepared.isLegacy) {
+        throw new TypeError("旧版存档键中不是 v1 行程");
+      }
+      if (prepared.isLegacy) {
+        try {
+          legacyArchiveSnapshot = captureTripArchiveSnapshot({
+            storage: tripArchiveStorage,
+            keys: [LEGACY_TRIP_BACKUP_KEY]
+          });
+        } catch (error) {
+          failures.add("旧版存档备份状态读取失败，未执行迁移");
+          rememberEmergencyLegacyTrip(candidate.raw);
+          continue;
+        }
+        const backupResult = backupLegacyTripRaw({
+          storage: tripArchiveStorage,
+          raw: candidate.raw
+        });
+        if (!backupResult.ok) {
+          failures.add("旧版存档备份失败，未执行迁移");
+          rememberEmergencyLegacyTrip(candidate.raw);
+          continue;
+        }
+        backupTouched = true;
+        legacyTripBackupPending = true;
+      }
+      const migrated = migrateTripState(prepared.data, { paceProfile: prepared.paceProfile });
+      const plan = normalizeTripPlan(migrated);
+      assertTripPlanCanRender(plan, { isLegacy: prepared.isLegacy });
+
+      commitAttempted = true;
+      const committed = commitTripPlan(plan, {
+        recordHistory: false,
+        completeLegacyMigration: false,
+        message: restoredTripMessage(candidate.source, failures)
+      });
+      clearEmergencyLegacyTrip();
+      if (!committed) return true;
+      return true;
+    } catch (error) {
+      if (backupTouched && !commitAttempted) {
+        const rollback = restoreTripArchiveSnapshot({
+          storage: tripArchiveStorage,
+          snapshot: legacyArchiveSnapshot,
+          keys: [LEGACY_TRIP_BACKUP_KEY]
+        });
+        if (rollback.ok) {
+          legacyTripBackupPending = previousPending;
+        } else {
+          legacyTripBackupPending = true;
+          rememberEmergencyLegacyTrip(candidate.raw);
+          failures.add("旧版存档备份回滚失败");
+        }
+      }
+      failures.add(`${candidate.label}格式无效`);
+    }
+  }
+
+  if (failures.size) {
+    const backupFailure = [...failures].some((failure) => failure.includes("备份"));
+    const storageFailure = [...failures].some((failure) => failure.includes("读取失败"));
+    const guidance = canExportTripFile({ emergencyLegacyRaw: emergencyLegacyTripRaw })
+      ? "请点击页面上的“导出行程”保存原始 v1 文件后重试。"
+      : storageFailure
+        ? "请保持页面打开，并在浏览器设置中检查本站点数据权限后重试。"
+        : "";
+    updateArchiveStatus(
+      `${[...failures].join("、")}。当前行程未更改。${backupFailure || storageFailure ? guidance : ""}`,
+      "error"
+    );
+  } else {
+    updateArchiveStatus("行程会自动保存到本机。");
+  }
+  return false;
+}
+
+function downloadTripFile(plan) {
+  const filename = tripFileName(plan, new Date());
+  downloadTextFile(tripFileText(plan), filename, "application/json;charset=utf-8");
+  return filename;
+}
+
+function exportTripFile() {
+  const exportPayload = tripFileExportPayload({
+    plan: state.tripPlan,
+    emergencyLegacyRaw: emergencyLegacyTripRaw,
+    timestamp: new Date()
+  });
+  if (!exportPayload) {
+    updateArchiveStatus("当前没有可导出的行程。", "error");
+    syncTripArchiveControls();
+    return;
+  }
+  try {
+    downloadTextFile(exportPayload.text, exportPayload.filename, "application/json;charset=utf-8");
+    if (exportPayload.kind === "legacy-emergency") {
+      clearEmergencyLegacyTrip();
+      updateArchiveStatus(`已导出旧版应急行程文件 ${exportPayload.filename}；可用“导入行程”重新导入。`, "success");
+    } else {
+      updateArchiveStatus(`已导出行程文件 ${exportPayload.filename}。`, "success");
+    }
+  } catch (error) {
+    updateArchiveStatus("行程文件导出失败，当前行程仍保留在本页，请重试。", "error");
+  }
 }
 
 async function copyShareLink() {
   if (!hasSerializableTrip()) return;
-  persistTripState("\u5df2\u4fdd\u5b58\uff0c\u6b63\u5728\u51c6\u5907\u5206\u4eab\u94fe\u63a5\u3002");
-  const shareUrl = shareUrlForTrip();
+  const persisted = persistTripState("已保存，正在准备分享。");
+  const hashCleared = persisted && lastTripPersistenceResult.hashCleared;
+  const shareUrl = shareUrlForTrip(state.tripPlan, window.location.href);
+  if (shouldUseTripFile(shareUrl)) {
+    try {
+      const filename = downloadTripFile(state.tripPlan);
+      if (!persisted) {
+        updateArchiveStatus(`本机存储失败，但当前行程仍保留并已导出 ${filename}。`, "error");
+      } else if (!hashCleared) {
+        updateArchiveStatus(`分享内容较大，已导出 ${filename}；但地址栏旧分享快照未能清理。`, "error");
+      } else {
+        updateArchiveStatus(`分享内容较大，已导出 ${filename}，请发送该行程文件。`, "success");
+      }
+    } catch (error) {
+      updateArchiveStatus("行程文件导出失败，当前行程仍保留在本页，请重试。", "error");
+    }
+    return;
+  }
+
+  let copied = false;
   try {
     await navigator.clipboard.writeText(shareUrl);
-    updateArchiveStatus("\u5206\u4eab\u94fe\u63a5\u5df2\u590d\u5236\uff0c\u540c\u884c\u8005\u6253\u5f00\u540e\u53ef\u6062\u590d\u8def\u7ebf\u3002", "success");
+    copied = true;
   } catch (error) {
-    updateArchiveStatus("\u526a\u8d34\u677f\u4e0d\u53ef\u7528\uff0c\u5df2\u5c06\u94fe\u63a5\u653e\u5230\u5730\u5740\u680f\u3002", "error");
+    copied = false;
   }
-  window.history.replaceState(null, "", shareUrl);
+
+  if (copied) {
+    if (!persisted) {
+      updateArchiveStatus("分享链接已复制，但本机存储失败；请另行导出行程文件备份。", "error");
+    } else if (!hashCleared) {
+      updateArchiveStatus("分享链接已复制且 v2 已保存，但地址栏旧分享快照未能清理。", "error");
+    } else {
+      updateArchiveStatus("分享链接已复制，同行者打开后可恢复完整行程。", "success");
+    }
+    return;
+  }
+
+  let addressUpdated = false;
+  try {
+    replaceBrowserUrl(shareUrl);
+    addressUpdated = true;
+  } catch (error) {
+    addressUpdated = false;
+  }
+
+  if (addressUpdated) {
+    if (!persisted) {
+      updateArchiveStatus("本机存储和剪贴板均不可用，短链接已放到地址栏；请导出行程文件备份。", "error");
+    } else {
+      updateArchiveStatus("剪贴板不可用，已将短链接放到地址栏。", "success");
+    }
+  } else {
+    updateArchiveStatus("分享链接复制失败，当前行程未受影响；请导出行程文件备份。", "error");
+  }
 }
 
-function clearTripHash() {
-  if (!window.location.hash.includes("trip=")) return;
-  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+async function importTripFile(event) {
+  const input = event.currentTarget;
+  const file = input?.files?.[0];
+  let snapshot = null;
+  let backupTouched = false;
+  let commitAttempted = false;
+  let failureReason = "invalid";
+  let rawText = null;
+  try {
+    if (!file) return;
+    rawText = await file.text();
+    const data = JSON.parse(rawText);
+    const prepared = prepareTripMigration(data, { allowLegacy: true });
+    if (prepared.isLegacy) {
+      try {
+        snapshot = captureTripImportSnapshot();
+      } catch (error) {
+        failureReason = "backup";
+        rememberEmergencyLegacyTrip(rawText);
+        throw error;
+      }
+      const backupResult = backupLegacyTripRaw({
+        storage: tripArchiveStorage,
+        raw: rawText
+      });
+      if (!backupResult.ok) {
+        failureReason = "backup";
+        rememberEmergencyLegacyTrip(rawText);
+        throw new Error("legacy trip backup failed");
+      }
+      backupTouched = true;
+      legacyTripBackupPending = true;
+    }
+
+    const migrated = migrateTripState(prepared.data, { paceProfile: prepared.paceProfile });
+    const plan = normalizeTripPlan(migrated);
+    assertTripPlanCanRender(plan, { isLegacy: prepared.isLegacy });
+    if (!snapshot) {
+      try {
+        snapshot = captureTripImportSnapshot();
+      } catch (error) {
+        failureReason = "storage";
+        throw error;
+      }
+    }
+
+    commitAttempted = true;
+    failureReason = "commit";
+    const committed = commitTripPlan(plan, {
+      completeLegacyMigration: false,
+      message: prepared.isLegacy
+        ? "旧版行程文件已迁移并保存为 v2；原始备份会在下一次有效编辑保存后清理。"
+        : "v2 行程文件已导入并保存到本机。"
+    });
+    if (!committed) {
+      throw new Error("trip import commit failed");
+    }
+    clearEmergencyLegacyTrip();
+  } catch (error) {
+    let rollbackSucceeded = true;
+    if (snapshot) {
+      legacyTripBackupPending = snapshot.legacyTripBackupPending;
+      if (backupTouched || commitAttempted) {
+        rollbackSucceeded = rollbackTripImportSnapshot(snapshot, {
+          restorePlan: commitAttempted,
+          restoreV2: commitAttempted,
+          restoreBackup: backupTouched
+        });
+      }
+    }
+
+    if (!rollbackSucceeded) {
+      updateArchiveStatus(`行程导入失败，且无法完全恢复导入前状态；${archiveFailureGuidance()}`, "error");
+    } else if (failureReason === "backup") {
+      updateArchiveStatus("旧版行程原文备份失败，未执行导入；当前行程、历史和 v2 存档均未更改。请点击页面上的“导出行程”保存刚选择的 v1 文件，并检查本机存储。", "error");
+    } else if (failureReason === "storage") {
+      updateArchiveStatus(`本机存储不可用，无法安全导入；当前行程和历史未更改。${archiveFailureGuidance()}`, "error");
+    } else if (failureReason === "commit") {
+      updateArchiveStatus(`行程文件保存失败，已恢复导入前的行程、历史和存档；${archiveFailureGuidance()}`, "error");
+    } else {
+      updateArchiveStatus("行程文件无效或无法读取，当前行程、编辑历史和本机存档均未更改。", "error");
+    }
+  } finally {
+    if (input) input.value = "";
+  }
 }
 
 function updateArchiveStatus(message, tone = "") {
@@ -3328,16 +3729,24 @@ function tripPaceProfile(mode = state.tripPace) {
 
 function setTransportMode(mode) {
   if (!transportProfiles[mode] || state.transportMode === mode) return;
+  if (state.tripPlan) {
+    const result = applyTripCommand(state.tripPlan, {
+      type: "update-metadata",
+      patch: { transportMode: mode }
+    });
+    if (result.changed) {
+      commitTripPlan(result.plan, {
+        message: "\u5df2\u66f4\u65b0\u4ea4\u901a\u65b9\u5f0f\u5e76\u4fdd\u5b58\u3002"
+      });
+    }
+    return;
+  }
   state.transportMode = mode;
   syncTransportButtons();
   recalculateRoutesForTransport();
   renderRoutes();
   renderPanel();
-  if (hasSerializableTrip()) {
-    persistTripState("\u5df2\u66f4\u65b0\u4ea4\u901a\u65b9\u5f0f\u5e76\u4fdd\u5b58\u3002");
-  } else {
-    updateArchiveStatus("\u4ea4\u901a\u65b9\u5f0f\u5df2\u66f4\u65b0\uff0c\u9009\u62e9\u57ce\u5e02\u540e\u4f1a\u81ea\u52a8\u4fdd\u5b58\u3002");
-  }
+  updateArchiveStatus("\u4ea4\u901a\u65b9\u5f0f\u5df2\u66f4\u65b0\uff0c\u9009\u62e9\u57ce\u5e02\u540e\u4f1a\u81ea\u52a8\u4fdd\u5b58\u3002");
 }
 
 function setTripPace(pace) {
@@ -3412,7 +3821,8 @@ function handlePlaceClick(placeId) {
       placeIds: [placeId],
       ...(requestedName ? { name: requestedName } : {}),
       startDate: tripStartDateInput?.value || null,
-      pace: state.tripPace
+      pace: state.tripPace,
+      transportMode: state.transportMode
     });
     commitTripPlan(plan, { recordHistory: false });
     return;
@@ -3683,6 +4093,11 @@ clearBtn.addEventListener("click", clearRoutes);
 resetViewBtn.addEventListener("click", resetMapView);
 if (saveTripBtn) saveTripBtn.addEventListener("click", () => persistTripState("\u5df2\u624b\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002"));
 if (shareTripBtn) shareTripBtn.addEventListener("click", copyShareLink);
+if (tripImportBtn && tripImportInput) {
+  tripImportBtn.addEventListener("click", () => tripImportInput.click());
+}
+if (tripImportInput) tripImportInput.addEventListener("change", importTripFile);
+if (exportTripFileBtn) exportTripFileBtn.addEventListener("click", exportTripFile);
 exportBtn.addEventListener("click", exportRoutes);
 exitCityViewBtn.addEventListener("click", () => exitCityView());
 transportButtons.forEach((button) => button.addEventListener("click", () => setTransportMode(button.dataset.mode)));

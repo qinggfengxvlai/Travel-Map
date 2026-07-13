@@ -29,6 +29,7 @@ test("creates a versioned trip without requiring a start date", () => {
   assert.equal(TRIP_STORAGE_KEY, "route-studio-trip-v2");
   assert.equal(LEGACY_TRIP_STORAGE_KEY, "route-studio-trip-v1");
   assert.equal(plan.startDate, null);
+  assert.equal(plan.transportMode, "highspeed");
   assert.deepEqual(plan.days, [
     {
       id: "day-1",
@@ -54,6 +55,30 @@ test("creates a versioned trip without requiring a start date", () => {
 
   const repeatedPlan = createTripPlan({ placeIds: ["a", "a", "b", "b", "a"], idFactory: ids() });
   assert.deepEqual(routePlaceIds(repeatedPlan), ["a", "b", "a"]);
+});
+
+test("keeps transport mode as normalized TripPlan metadata", () => {
+  const train = createTripPlan({
+    placeIds: ["beijing"],
+    transportMode: "train",
+    idFactory: ids()
+  });
+  assert.equal(train.transportMode, "train");
+
+  const invalid = createTripPlan({
+    placeIds: ["beijing"],
+    transportMode: "flight",
+    idFactory: ids()
+  });
+  assert.equal(invalid.transportMode, "highspeed");
+
+  const scheduled = autoScheduleTrip({
+    placeIds: ["beijing", "wuhan"],
+    paceProfile: { dailyTravelLimitSeconds: 8 * 3600, maxDailyPlaces: 3 },
+    metadata: { transportMode: "train" },
+    idFactory: ids()
+  });
+  assert.equal(scheduled.transportMode, "train");
 });
 
 test("derives calendar dates without persisting day numbers", () => {
@@ -1651,6 +1676,23 @@ test("migrates explicit v1 and unversioned legacy snapshots", () => {
   });
 });
 
+test("migrates legacy transport modes and falls back from invalid values", () => {
+  for (const transportMode of ["highspeed", "train"]) {
+    const migrated = migrateTripState({
+      version: 1,
+      selectedCityId: "wuhan",
+      transportMode
+    }, { idFactory: ids() });
+    assert.equal(migrated.transportMode, transportMode);
+  }
+
+  const invalid = migrateTripState({
+    selectedCityId: "wuhan",
+    transportMode: "flight"
+  }, { idFactory: ids() });
+  assert.equal(invalid.transportMode, "highspeed");
+});
+
 test("migrates a selected city when an old snapshot has no routes", () => {
   const result = migrateTripState({ selectedCityId: "wuhan", tripPace: "relaxed" }, { idFactory: ids() });
   assert.deepEqual(routePlaceIds(result), ["wuhan"]);
@@ -1677,7 +1719,11 @@ test("canonicalizes saved timestamps and legacy pace values", () => {
 });
 
 test("compacts a trip without mutating or dropping user content", () => {
-  const plan = createTripPlan({ placeIds: ["beijing"], idFactory: ids() });
+  const plan = createTripPlan({
+    placeIds: ["beijing"],
+    transportMode: "train",
+    idFactory: ids()
+  });
   plan.savedAt = "2026-07-13T12:00:00.000Z";
   plan.days[0].items.push({
     id: "activity-1",
@@ -1694,8 +1740,31 @@ test("compacts a trip without mutating or dropping user content", () => {
   const result = compactTripPlan(plan);
   assert.deepEqual(result, expected);
   assert.equal(result.version, TRIP_PLAN_VERSION);
+  assert.equal(result.transportMode, "train");
   assert.notEqual(result.days, plan.days);
   assert.deepEqual(plan, before);
+
+  const roundTrip = normalizeTripPlan(result, { idFactory: ids() });
+  assert.equal(roundTrip.transportMode, "train");
+});
+
+test("normalizes and updates transport mode metadata", () => {
+  assert.equal(
+    normalizeTripPlan({ transportMode: "train", days: [] }, { idFactory: ids() }).transportMode,
+    "train"
+  );
+  assert.equal(
+    normalizeTripPlan({ transportMode: "flight", days: [] }, { idFactory: ids() }).transportMode,
+    "highspeed"
+  );
+
+  const plan = createTripPlan({ placeIds: ["beijing"], idFactory: ids() });
+  const updated = applyTripCommand(plan, {
+    type: "update-metadata",
+    patch: { transportMode: "train" }
+  });
+  assert.equal(updated.changed, true);
+  assert.equal(updated.plan.transportMode, "train");
 });
 
 test("uses a trip file only beyond the 12000 character boundary", () => {
