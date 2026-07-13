@@ -125,8 +125,16 @@
             <h2>&#26102;&#38388;&#35268;&#21010;</h2>
             <span id="itineraryMeta">&#24453;&#29983;&#25104;</span>
           </div>
+          <div class="trip-settings">
+            <label>&#34892;&#31243;&#21517;&#31216;<input id="tripNameInput" maxlength="60" autocomplete="off" /></label>
+            <label>&#20986;&#21457;&#26085;&#26399;<input id="tripStartDateInput" type="date" /></label>
+            <div class="trip-setting-actions">
+              <button id="autoScheduleBtn" class="icon-button" type="button">&#33258;&#21160;&#25490;&#26399;</button>
+              <button id="undoTripEditBtn" class="icon-button" type="button" disabled>&#25764;&#38144;&#32534;&#36753;</button>
+            </div>
+          </div>
           <div id="tripHealth" class="trip-health" hidden></div>
-          <ol id="itineraryList" class="itinerary-list"></ol>
+          <div id="tripEditorRoot"></div>
           <p id="itineraryEmptyState" class="empty-state">&#36873;&#25321;&#36215;&#28857;&#21518;&#20250;&#29983;&#25104;&#31532; 1 &#22825;&#34892;&#31243;&#65307;&#32487;&#32493;&#36873;&#25321;&#22478;&#24066;&#21518;&#65292;&#20250;&#25353;&#27599;&#26085;&#36328;&#22478;&#26102;&#38271;&#33258;&#21160;&#20998;&#37197;&#21040;&#27599;&#22825;&#12290;</p>
         </section>
 
@@ -166,6 +174,6 @@
     </main>
 
     <script src="./vendor/leaflet/leaflet.js?v=1.9.4"></script>
-    <script src="./app.js?v=itinerary-guide-4"></script>
+    <script type="module" src="./app.js?v=calendar-planner-1"></script>
   </body>
 </html>

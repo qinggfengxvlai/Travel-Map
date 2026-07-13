@@ -1,3 +1,11 @@
+import {
+  autoScheduleTrip,
+  createTripPlan,
+  reconcileRoutePlaces,
+  routePlaceIds
+} from "./trip-plan.js";
+import { mountTripEditor, renderTripEditorMarkup } from "./trip-editor.js";
+
 const labels = {
   chooseStart: "\u9009\u62e9\u51fa\u53d1\u57ce\u5e02",
   chooseHint: "\u70b9\u51fb\u4e2d\u56fd\u5730\u56fe\u4e0a\u7684\u5706\u5f62\u57ce\u5e02\u5750\u6807\u4f5c\u4e3a\u8d77\u70b9\u3002",
@@ -418,6 +426,9 @@ const state = {
   selectedCityId: null,
   transportMode: "highspeed",
   tripPace: "standard",
+  tripPlan: null,
+  tripHistory: [],
+  tripEditorDestroy: null,
   viewMode: "china",
   activeCityViewId: null,
   activeDistrictBoundaryCount: 0,
@@ -491,6 +502,11 @@ const foodArticleList = document.querySelector("#foodArticleList");
 const foodEmptyState = document.querySelector("#foodEmptyState");
 const itineraryMeta = document.querySelector("#itineraryMeta");
 const itineraryList = document.querySelector("#itineraryList");
+const tripNameInput = document.querySelector("#tripNameInput");
+const tripStartDateInput = document.querySelector("#tripStartDateInput");
+const autoScheduleBtn = document.querySelector("#autoScheduleBtn");
+const undoTripEditBtn = document.querySelector("#undoTripEditBtn");
+const tripEditorRoot = document.querySelector("#tripEditorRoot");
 const itineraryEmptyState = document.querySelector("#itineraryEmptyState");
 const tripHealth = document.querySelector("#tripHealth");
 const tripArchiveStatus = document.querySelector("#tripArchiveStatus");
@@ -1177,6 +1193,86 @@ function curvedRoutePoints(from, to) {
   });
 }
 
+function isValidRouteId(routeId) {
+  return (Number.isSafeInteger(routeId) && routeId > 0) ||
+    (typeof routeId === "string" && routeId.trim().length > 0);
+}
+
+function syncRoutesFromTripPlan() {
+  const placeIds = state.tripPlan ? routePlaceIds(state.tripPlan) : [];
+  const previousRoutes = state.routes;
+  const claimedRoutes = new Set();
+  const claimedRouteIds = new Set();
+  const reservedRouteIds = new Set(
+    previousRoutes.map((route) => route?.id).filter(isValidRouteId)
+  );
+  const largestNumericId = previousRoutes.reduce(
+    (largest, route) => Number.isSafeInteger(route?.id) ? Math.max(largest, route.id) : largest,
+    0
+  );
+  state.nextRouteId = Math.max(
+    Number.isSafeInteger(state.nextRouteId) && state.nextRouteId > 0 ? state.nextRouteId : 1,
+    largestNumericId + 1
+  );
+
+  const allocateRouteId = () => {
+    while (reservedRouteIds.has(state.nextRouteId)) state.nextRouteId += 1;
+    const routeId = state.nextRouteId;
+    state.nextRouteId += 1;
+    reservedRouteIds.add(routeId);
+    return routeId;
+  };
+  const routesToEstimate = [];
+  const nextRoutes = placeIds.slice(1).map((to, index) => {
+    const from = placeIds[index];
+    const reusable = previousRoutes.find((route) =>
+      !claimedRoutes.has(route) &&
+      isValidRouteId(route?.id) &&
+      !claimedRouteIds.has(route.id) &&
+      route.from === from &&
+      route.to === to &&
+      route.transportMode === state.transportMode
+    );
+    if (reusable) {
+      claimedRoutes.add(reusable);
+      claimedRouteIds.add(reusable.id);
+      return reusable;
+    }
+
+    const route = {
+      id: allocateRouteId(),
+      from,
+      to,
+      status: "loading",
+      distance: null,
+      duration: null,
+      fallback: false,
+      error: null,
+      transportMode: state.transportMode,
+      transportLabel: transportProfile().label
+    };
+    claimedRouteIds.add(route.id);
+    routesToEstimate.push(route);
+    return route;
+  });
+
+  state.routes = nextRoutes;
+  state.selectedCityId = placeIds.at(-1) ?? null;
+  routesToEstimate.forEach((route) => calculateRouteMetrics(route));
+}
+
+function commitTripPlan(nextPlan, { recordHistory = true, message = "\u5df2\u81ea\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002" } = {}) {
+  if (recordHistory && state.tripPlan && state.tripPlan !== nextPlan) {
+    state.tripHistory.push(structuredClone(state.tripPlan));
+  }
+  state.tripHistory = state.tripHistory.slice(-20);
+  state.tripPlan = nextPlan;
+  syncRoutesFromTripPlan();
+  renderRoutes();
+  renderPanel();
+  persistTripState(message);
+}
+
 function renderPanel() {
   const selected = placeById(state.selectedCityId);
   syncTransportButtons();
@@ -1220,7 +1316,7 @@ function renderPanel() {
   emptyState.hidden = state.routes.length > 0;
   undoBtn.disabled = state.routes.length === 0;
   clearBtn.disabled = state.routes.length === 0 && !state.selectedCityId;
-  const hasPlan = state.routes.length > 0 || Boolean(state.selectedCityId);
+  const hasPlan = Boolean(state.tripPlan);
   if (saveTripBtn) saveTripBtn.disabled = !hasPlan;
   if (shareTripBtn) shareTripBtn.disabled = !hasPlan;
   exportBtn.disabled = state.routes.length === 0;
@@ -1238,8 +1334,54 @@ function renderPanel() {
   updateCityStyles();
   updateTotals();
   chainLabel.textContent = buildChainLabel();
-  renderItineraryPanel();
+  renderTripPlanner();
   renderFoodPanel();
+}
+
+function renderTripPlanner() {
+  if (!tripEditorRoot || !itineraryMeta || !itineraryEmptyState || !tripHealth) return;
+  if (typeof state.tripEditorDestroy === "function") state.tripEditorDestroy();
+  state.tripEditorDestroy = null;
+  tripEditorRoot.replaceChildren();
+
+  const plan = state.tripPlan;
+  const hasCalendar = Array.isArray(plan?.days) && plan.days.length > 0;
+  if (tripNameInput) tripNameInput.value = plan?.name || "";
+  if (tripStartDateInput) tripStartDateInput.value = plan?.startDate || "";
+  if (autoScheduleBtn) autoScheduleBtn.disabled = !hasCalendar;
+  if (undoTripEditBtn) undoTripEditBtn.disabled = state.tripHistory.length === 0;
+  itineraryEmptyState.hidden = hasCalendar;
+
+  if (!hasCalendar) {
+    itineraryMeta.textContent = "\u5f85\u751f\u6210";
+    tripHealth.hidden = true;
+    tripHealth.className = "trip-health";
+    tripHealth.textContent = "";
+    return;
+  }
+
+  const pace = tripPaceProfile(plan.pace);
+  const planPlaceIds = routePlaceIds(plan);
+  itineraryMeta.textContent = `${plan.days.length} \u5929 \u00b7 ${pace.label} \u00b7 ${planPlaceIds.length} \u4e2a\u5730\u70b9`;
+  const errorCount = state.routes.filter((route) => route.status === "error").length;
+  const loadingCount = state.routes.filter((route) => route.status === "loading").length;
+  tripHealth.hidden = false;
+  tripHealth.className = `trip-health${errorCount ? " warning" : ""}`;
+  tripHealth.textContent = errorCount
+    ? `\u6709 ${errorCount} \u6bb5\u8def\u7ebf\u6682\u65f6\u65e0\u6cd5\u4f30\u7b97\u3002`
+    : loadingCount
+      ? `\u6b63\u5728\u4f30\u7b97 ${loadingCount} \u6bb5\u8def\u7ebf\u3002`
+      : `${plan.days.length} \u5929\u884c\u7a0b\u5df2\u4e0e\u5730\u56fe\u8def\u7ebf\u540c\u6b65\u3002`;
+
+  tripEditorRoot.innerHTML = renderTripEditorMarkup({
+    plan,
+    placeName: (placeId) => placeById(placeId)?.name || placeId
+  });
+  state.tripEditorDestroy = mountTripEditor({
+    root: tripEditorRoot,
+    onCommand: () => {},
+    onEditRequest: () => {}
+  });
 }
 
 function updateTotals() {
@@ -1627,7 +1769,8 @@ function tripStateFromStorage() {
 }
 
 function restoreTripState() {
-  const data = tripStateFromHash() || tripStateFromStorage();
+  const sharedTripState = tripStateFromHash();
+  const data = sharedTripState || tripStateFromStorage();
   if (!data) {
     updateArchiveStatus("\u8def\u7ebf\u4f1a\u81ea\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002");
     return false;
@@ -1650,9 +1793,8 @@ function restoreTripState() {
       }))
     : [];
 
-  const selected = data.selectedCityId && placeById(data.selectedCityId)
-    ? data.selectedCityId
-    : restoredRoutes[restoredRoutes.length - 1]?.to || null;
+  const selected = restoredRoutes[restoredRoutes.length - 1]?.to ||
+    (data.selectedCityId && placeById(data.selectedCityId) ? data.selectedCityId : null);
   if (!selected && !restoredRoutes.length) return false;
 
   state.transportMode = transportProfiles[data.transportMode] ? data.transportMode : state.transportMode;
@@ -1663,7 +1805,16 @@ function restoreTripState() {
   recalculateRoutesForTransport();
   syncTransportButtons();
   syncPaceButtons();
-  updateArchiveStatus(tripStateFromHash() ? "\u5df2\u4ece\u5206\u4eab\u94fe\u63a5\u6062\u590d\u884c\u7a0b\u3002" : "\u5df2\u4ece\u672c\u673a\u5b58\u6863\u6062\u590d\u884c\u7a0b\u3002", "success");
+  const restoredPlaceIds = restoredRoutes.length
+    ? [restoredRoutes[0].from, ...restoredRoutes.map((route) => route.to)]
+    : [selected];
+  const plan = createTripPlan({ placeIds: restoredPlaceIds, pace: state.tripPace });
+  commitTripPlan(plan, {
+    recordHistory: false,
+    message: sharedTripState
+      ? "\u5df2\u4ece\u5206\u4eab\u94fe\u63a5\u6062\u590d\u884c\u7a0b\u3002"
+      : "\u5df2\u4ece\u672c\u673a\u5b58\u6863\u6062\u590d\u884c\u7a0b\u3002"
+  });
   return true;
 }
 
@@ -2861,12 +3012,17 @@ function setTripPace(pace) {
   if (!tripPaceProfiles[pace] || state.tripPace === pace) return;
   state.tripPace = pace;
   syncPaceButtons();
-  renderPanel();
-  if (hasSerializableTrip()) {
-    persistTripState("\u5df2\u66f4\u65b0\u884c\u7a0b\u5f3a\u5ea6\u5e76\u4fdd\u5b58\u3002");
-  } else {
-    updateArchiveStatus("\u884c\u7a0b\u5f3a\u5ea6\u5df2\u66f4\u65b0\uff0c\u9009\u62e9\u57ce\u5e02\u540e\u4f1a\u81ea\u52a8\u4fdd\u5b58\u3002");
+  if (state.tripPlan) {
+    const nextPlan = structuredClone(state.tripPlan);
+    nextPlan.pace = pace;
+    nextPlan.savedAt = new Date().toISOString();
+    commitTripPlan(nextPlan, {
+      message: "\u5df2\u66f4\u65b0\u884c\u7a0b\u5f3a\u5ea6\u5e76\u4fdd\u5b58\u3002"
+    });
+    return;
   }
+  renderPanel();
+  updateArchiveStatus("\u884c\u7a0b\u5f3a\u5ea6\u5df2\u66f4\u65b0\uff0c\u9009\u62e9\u57ce\u5e02\u540e\u4f1a\u81ea\u52a8\u4fdd\u5b58\u3002");
 }
 
 function syncTransportButtons() {
@@ -2918,39 +3074,27 @@ function handlePlaceClick(placeId) {
   const place = placeById(placeId);
   if (!place) return;
 
-  if (!state.selectedCityId) {
+  if (!state.tripPlan) {
+    const requestedName = tripNameInput?.value.trim();
+    const plan = createTripPlan({
+      placeIds: [placeId],
+      ...(requestedName ? { name: requestedName } : {}),
+      startDate: tripStartDateInput?.value || null,
+      pace: state.tripPace
+    });
+    commitTripPlan(plan, { recordHistory: false });
+    return;
+  }
+
+  const currentPlaceIds = routePlaceIds(state.tripPlan);
+  if (currentPlaceIds.at(-1) === placeId) {
     state.selectedCityId = placeId;
     renderPanel();
-    persistTripState();
     return;
   }
 
-  if (state.selectedCityId === placeId) {
-    state.selectedCityId = null;
-    renderPanel();
-    persistTripState();
-    return;
-  }
-
-  const route = {
-    id: state.nextRouteId,
-    from: state.selectedCityId,
-    to: placeId,
-    status: "loading",
-    distance: null,
-    duration: null,
-    fallback: false,
-    error: null,
-    transportMode: state.transportMode,
-    transportLabel: transportProfile().label
-  };
-  state.nextRouteId += 1;
-  state.routes.push(route);
-  state.selectedCityId = placeId;
-  renderRoutes();
-  renderPanel();
-  persistTripState();
-  calculateRouteMetrics(route);
+  const result = reconcileRoutePlaces(state.tripPlan, [...currentPlaceIds, placeId]);
+  commitTripPlan(result.plan);
 }
 
 function handleCityClick(cityId) {
@@ -3020,19 +3164,20 @@ function toRadians(degrees) {
 }
 
 function undoRoute() {
-  const removed = state.routes.pop();
-  if (removed) state.selectedCityId = removed.from;
-  renderRoutes();
-  renderPanel();
-  persistTripState("\u5df2\u64a4\u9500\u5e76\u4fdd\u5b58\u3002");
+  if (!state.tripPlan) return;
+  const placeIds = routePlaceIds(state.tripPlan);
+  if (placeIds.length < 2) return;
+  const result = reconcileRoutePlaces(state.tripPlan, placeIds.slice(0, -1));
+  if (result.blockedRemovals.length) {
+    updateArchiveStatus("\u672b\u5c3e\u5730\u70b9\u5305\u542b\u5df2\u7f16\u8f91\u5b89\u6392\uff0c\u6682\u672a\u64a4\u9500\u3002", "error");
+    return;
+  }
+  commitTripPlan(result.plan, { message: "\u5df2\u64a4\u9500\u5e76\u4fdd\u5b58\u3002" });
 }
 
 function clearRoutes() {
-  state.routes = [];
-  state.selectedCityId = null;
-  renderRoutes();
-  renderPanel();
-  clearPersistedTripState();
+  state.tripHistory = [];
+  commitTripPlan(null, { recordHistory: false });
 }
 
 function exportRoutes() {
