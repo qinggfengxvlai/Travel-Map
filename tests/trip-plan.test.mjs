@@ -6,9 +6,14 @@ import {
   TRIP_PLAN_VERSION,
   applyTripCommand,
   autoScheduleTrip,
+  compactTripPlan,
   createTripPlan,
   dayDate,
+  migrateTripState,
+  normalizeTripPlan,
+  reconcileRoutePlaces,
   routePlaceIds,
+  shouldUseTripFile,
   timeToMinutes,
   validateTripPlan
 } from "../public/static-site/trip-plan.js";
@@ -534,6 +539,68 @@ test("confirms and removes overnight transport linked to a removed city occurren
   assert.deepEqual(plan, before);
 });
 
+test("treats an untimed previous-day overnight transport as a structural arrival", () => {
+  const plan = createTripPlan({ placeIds: ["a"], idFactory: ids() });
+  plan.days[0].items = [{
+    id: "too-early",
+    type: "transport",
+    fromPlaceId: "a",
+    toPlaceId: "b",
+    startTime: "",
+    endTime: "",
+    endDayOffset: "1"
+  }];
+  plan.days.push({
+    id: "day-before",
+    cityEntries: [{ id: "entry-before", visitId: "visit-before", placeId: "a", manuallyPlaced: false }],
+    overnightPlaceId: "a",
+    items: [{
+      id: "untimed-night",
+      type: "transport",
+      fromPlaceId: "a",
+      toPlaceId: "b",
+      startTime: "",
+      endTime: "invalid",
+      endDayOffset: "1"
+    }, {
+      id: "offset-zero",
+      type: "transport",
+      fromPlaceId: "a",
+      toPlaceId: "b",
+      startTime: "",
+      endTime: "",
+      endDayOffset: "0"
+    }],
+    lodging: null,
+    manuallyEdited: false
+  }, {
+    id: "day-target",
+    cityEntries: [{ id: "entry-target-b", visitId: "visit-target-b", placeId: "b", manuallyPlaced: false }],
+    overnightPlaceId: "b",
+    items: [],
+    lodging: null,
+    manuallyEdited: false
+  });
+  const before = structuredClone(plan);
+  const command = { type: "remove-city", entryId: "entry-target-b" };
+
+  const guarded = applyTripCommand(plan, command);
+  assert.equal(guarded.requiresConfirmation, true);
+  assert.equal(guarded.changed, false);
+  assert.deepEqual(guarded.affectedDayIds, ["day-before", "day-target"]);
+  assert.equal(guarded.plan, plan);
+
+  const forced = applyTripCommand(plan, command, { force: true });
+  assert.equal(forced.changed, true);
+  assert.equal(forced.plan.days.some((day) => day.id === "day-target"), false);
+  assert.deepEqual(forced.plan.days[0].items.map((item) => item.id), ["too-early"]);
+  assert.deepEqual(
+    forced.plan.days.find((day) => day.id === "day-before").items.map((item) => item.id),
+    ["offset-zero"]
+  );
+  assert.deepEqual(plan, before);
+});
+
 test("removes a day when its final city is removed", () => {
   const plan = createTripPlan({ placeIds: ["beijing"], idFactory: ids() });
   const result = applyTripCommand(plan, {
@@ -815,4 +882,636 @@ test("reports daily feasibility warnings with a complete structure", () => {
   }).map((warning) => warning.code);
   assert.equal(defaultWindowCodes.includes("play-time-short"), true);
   assert.equal(defaultWindowCodes.includes("travel-over-limit"), false);
+});
+
+test("inserts a new route place without moving manually edited days", () => {
+  const plan = createTripPlan({ placeIds: ["beijing", "wuhan"], idFactory: ids() });
+  plan.days[0].manuallyEdited = true;
+  const result = reconcileRoutePlaces(plan, ["beijing", "zhengzhou", "wuhan"], { idFactory: ids() });
+  assert.deepEqual(routePlaceIds(result.plan), ["beijing", "zhengzhou", "wuhan"]);
+  assert.equal(result.plan.days[0].id, plan.days[0].id);
+});
+
+test("rejects invalid route place inputs before changing a plan", () => {
+  const plan = createTripPlan({ placeIds: ["a", "b"], idFactory: ids() });
+  const before = structuredClone(plan);
+  [undefined, null, "a,b", {}, ["a", " "], ["a", 7]].forEach((nextPlaceIds) => {
+    assert.throws(
+      () => reconcileRoutePlaces(plan, nextPlaceIds, { idFactory: ids() }),
+      { name: "TypeError", message: "路线地点格式无效" }
+    );
+    assert.deepEqual(plan, before);
+  });
+
+  const trimmed = reconcileRoutePlaces(plan, [" a ", " b "], { idFactory: ids() });
+  assert.deepEqual(routePlaceIds(trimmed.plan), ["a", "b"]);
+});
+
+test("inserts a repeated route occurrence with a distinct visit", () => {
+  const plan = createTripPlan({ placeIds: ["a", "b"], idFactory: ids() });
+  const dayId = plan.days[0].id;
+  const [firstA, existingB] = plan.days[0].cityEntries;
+
+  const result = reconcileRoutePlaces(plan, ["a", "b", "a"], { idFactory: ids() });
+  const entries = result.plan.days[0].cityEntries;
+  const aEntries = entries.filter((entry) => entry.placeId === "a");
+  assert.deepEqual(routePlaceIds(result.plan), ["a", "b", "a"]);
+  assert.equal(result.plan.days[0].id, dayId);
+  assert.equal(entries[0].id, firstA.id);
+  assert.equal(entries[1].id, existingB.id);
+  assert.equal(aEntries.length, 2);
+  assert.notEqual(aEntries[0].visitId, aEntries[1].visitId);
+});
+
+test("removes only an unmatched repeated route occurrence", () => {
+  const plan = createTripPlan({ placeIds: ["a", "b", "a"], idFactory: ids() });
+  const dayId = plan.days[0].id;
+  const [firstA, existingB, finalA] = plan.days[0].cityEntries;
+  plan.days[0].items = [{ id: "activity-a", type: "activity", placeId: "a" }];
+  plan.days[0].lodging = { placeId: "a", name: "A 酒店" };
+
+  const result = reconcileRoutePlaces(plan, ["a", "b"], { idFactory: ids() });
+  assert.deepEqual(routePlaceIds(result.plan), ["a", "b"]);
+  assert.equal(result.plan.days[0].id, dayId);
+  assert.deepEqual(result.plan.days[0].cityEntries.map((entry) => entry.id), [firstA.id, existingB.id]);
+  assert.equal(result.plan.days[0].cityEntries.some((entry) => entry.id === finalA.id), false);
+  assert.deepEqual(result.plan.days[0].items, [{ id: "activity-a", type: "activity", placeId: "a" }]);
+  assert.deepEqual(result.plan.days[0].lodging, { placeId: "a", name: "A 酒店" });
+});
+
+test("blocks and authorizes removal of only the protected repeated occurrence", () => {
+  const plan = createTripPlan({ placeIds: ["a"], idFactory: ids() });
+  const firstAEntryId = plan.days[0].cityEntries[0].id;
+  plan.days.push({
+    id: "day-b",
+    cityEntries: [{ id: "entry-b", visitId: "visit-b", placeId: "b", manuallyPlaced: false }],
+    overnightPlaceId: "b",
+    items: [],
+    lodging: null,
+    manuallyEdited: false
+  }, {
+    id: "day-final-a",
+    cityEntries: [{ id: "entry-final-a", visitId: "visit-final-a", placeId: "a", manuallyPlaced: true }],
+    overnightPlaceId: "a",
+    items: [],
+    lodging: null,
+    manuallyEdited: true
+  });
+  const before = structuredClone(plan);
+
+  const blocked = reconcileRoutePlaces(plan, ["a", "b"], { idFactory: ids() });
+  assert.deepEqual(routePlaceIds(blocked.plan), ["a", "b", "a"]);
+  assert.deepEqual(blocked.blockedRemovals, [{ placeId: "a", dayIds: ["day-final-a"] }]);
+  assert.deepEqual(plan, before);
+
+  const removed = reconcileRoutePlaces(plan, ["a", "b"], {
+    idFactory: ids(),
+    allowRemovalIds: new Set(["a"])
+  });
+  assert.deepEqual(removed.blockedRemovals, []);
+  assert.deepEqual(routePlaceIds(removed.plan), ["a", "b"]);
+  assert.equal(removed.plan.days.length, 2);
+  assert.equal(removed.plan.days[0].cityEntries[0].id, firstAEntryId);
+  assert.equal(removed.plan.days.some((day) => day.id === "day-final-a"), false);
+  assert.deepEqual(plan, before);
+});
+
+test("aggregates protection when multiple unmatched occurrences leave a day", () => {
+  const plan = createTripPlan({ placeIds: ["a"], idFactory: ids() });
+  plan.days.push({
+    id: "day-b",
+    cityEntries: [{ id: "entry-b", visitId: "visit-b", placeId: "b", manuallyPlaced: false }],
+    overnightPlaceId: "b",
+    items: [],
+    lodging: null,
+    manuallyEdited: false
+  }, {
+    id: "day-tail",
+    cityEntries: [
+      { id: "entry-extra-a-1", visitId: "visit-extra-a-1", placeId: "a", manuallyPlaced: false },
+      { id: "entry-c", visitId: "visit-c", placeId: "c", manuallyPlaced: false },
+      { id: "entry-extra-a-2", visitId: "visit-extra-a-2", placeId: "a", manuallyPlaced: false }
+    ],
+    overnightPlaceId: "a",
+    items: [{ id: "activity-a", type: "activity", placeId: "a" }],
+    lodging: { placeId: "a", name: "A 酒店" },
+    manuallyEdited: false
+  });
+  const before = structuredClone(plan);
+
+  const blocked = reconcileRoutePlaces(plan, ["a", "b", "c"], { idFactory: ids() });
+  assert.deepEqual(blocked.blockedRemovals, [{ placeId: "a", dayIds: ["day-tail"] }]);
+  assert.deepEqual(blocked.plan, before);
+
+  const removed = reconcileRoutePlaces(plan, ["a", "b", "c"], {
+    idFactory: ids(),
+    allowRemovalIds: new Set(["a"])
+  });
+  const tailDay = removed.plan.days.find((day) => day.id === "day-tail");
+  assert.deepEqual(routePlaceIds(removed.plan), ["a", "b", "c"]);
+  assert.deepEqual(tailDay.cityEntries.map((entry) => entry.placeId), ["c"]);
+  assert.deepEqual(tailDay.items, []);
+  assert.equal(tailDay.lodging, null);
+  assert.equal(tailDay.overnightPlaceId, "c");
+  assert.deepEqual(plan, before);
+});
+
+test("keeps blocked route reconciliation transactional during reordering", () => {
+  const plan = createTripPlan({ placeIds: ["a"], idFactory: ids() });
+  plan.days.push({
+    id: "day-b",
+    cityEntries: [{ id: "entry-b", visitId: "visit-b", placeId: "b", manuallyPlaced: false }],
+    overnightPlaceId: "b",
+    items: [],
+    lodging: null,
+    manuallyEdited: true
+  }, {
+    id: "day-c",
+    cityEntries: [{ id: "entry-c", visitId: "visit-c", placeId: "c", manuallyPlaced: false }],
+    overnightPlaceId: "c",
+    items: [{ id: "activity-c", type: "activity", placeId: "c" }],
+    lodging: null,
+    manuallyEdited: false
+  });
+  const before = structuredClone(plan);
+
+  const blocked = reconcileRoutePlaces(plan, ["c", "b", "a"], { idFactory: ids() });
+  assert.equal(blocked.plan, plan);
+  assert.deepEqual(routePlaceIds(blocked.plan), ["a", "b", "c"]);
+  assert.deepEqual(blocked.blockedRemovals, [
+    { placeId: "b", dayIds: ["day-b"] },
+    { placeId: "c", dayIds: ["day-c"] }
+  ]);
+  assert.deepEqual(plan, before);
+
+  const allowed = reconcileRoutePlaces(plan, ["c", "b", "a"], {
+    idFactory: ids(),
+    allowRemovalIds: new Set(["b", "c"])
+  });
+  assert.deepEqual(allowed.blockedRemovals, []);
+  assert.deepEqual(routePlaceIds(allowed.plan), ["c", "b", "a"]);
+  assert.deepEqual(plan, before);
+});
+
+test("migrates the existing route snapshot to v2", () => {
+  const result = migrateTripState({
+    transportMode: "highspeed",
+    tripPace: "standard",
+    selectedCityId: "wuhan",
+    routes: [{ from: "beijing", to: "zhengzhou" }, { from: "zhengzhou", to: "wuhan" }]
+  }, { idFactory: ids(), paceProfile: { dailyTravelLimitSeconds: 4 * 3600, maxDailyPlaces: 3 } });
+  assert.equal(result.version, 2);
+  assert.deepEqual(routePlaceIds(result), ["beijing", "zhengzhou", "wuhan"]);
+});
+
+test("uses a trip file when the final URL exceeds 12000 characters", () => {
+  assert.equal(shouldUseTripFile("https://example.test/#trip=" + "x".repeat(12000)), true);
+  assert.equal(compactTripPlan(createTripPlan({ placeIds: ["beijing"], idFactory: ids() })).version, 2);
+});
+
+test("blocks protected route removals with unique ordered day IDs", () => {
+  const plan = createTripPlan({ placeIds: ["beijing", "wuhan"], idFactory: ids() });
+  const firstDay = plan.days[0];
+  firstDay.manuallyEdited = true;
+  firstDay.items = [
+    { id: "keep-beijing", type: "activity", placeId: "beijing" },
+    {
+      id: "remove-wuhan",
+      type: "transport",
+      placeId: "wuhan",
+      fromPlaceId: "wuhan",
+      toPlaceId: "wuhan"
+    }
+  ];
+  plan.days.push({
+    id: "day-later",
+    cityEntries: [
+      { id: "entry-zhengzhou", visitId: "visit-zhengzhou", placeId: "zhengzhou", manuallyPlaced: false }
+    ],
+    overnightPlaceId: "zhengzhou",
+    items: [
+      { id: "arrive-zhengzhou", type: "transport", fromPlaceId: "wuhan", toPlaceId: "zhengzhou" },
+      { id: "keep-zhengzhou", type: "activity", placeId: "zhengzhou" }
+    ],
+    lodging: { placeId: "wuhan", name: "旧酒店" },
+    manuallyEdited: false
+  });
+  const before = structuredClone(plan);
+
+  const blocked = reconcileRoutePlaces(plan, ["beijing", "zhengzhou"], { idFactory: ids() });
+  assert.equal(blocked.plan, plan);
+  assert.deepEqual(blocked.plan, before);
+  assert.deepEqual(blocked.blockedRemovals, [{
+    placeId: "wuhan",
+    dayIds: [firstDay.id, "day-later"]
+  }]);
+  assert.deepEqual(plan, before);
+
+  const removed = reconcileRoutePlaces(plan, ["beijing", "zhengzhou"], {
+    idFactory: ids(),
+    allowRemovalIds: new Set(["wuhan"])
+  });
+  assert.deepEqual(removed.blockedRemovals, []);
+  assert.deepEqual(routePlaceIds(removed.plan), ["beijing", "zhengzhou"]);
+  assert.deepEqual(removed.plan.days[0].items.map((item) => item.id), ["keep-beijing"]);
+  assert.equal(removed.plan.days[0].lodging, null);
+  assert.equal(removed.plan.days[0].overnightPlaceId, "beijing");
+  assert.deepEqual(removed.plan.days[1].items.map((item) => item.id), ["keep-zhengzhou"]);
+  assert.equal(removed.plan.days[1].lodging, null);
+  assert.equal(removed.plan.days[1].overnightPlaceId, "zhengzhou");
+  assert.deepEqual(plan, before);
+});
+
+test("removes an unprotected route place and its empty day", () => {
+  const plan = createTripPlan({ placeIds: ["beijing"], idFactory: ids() });
+  plan.days.push({
+    id: "day-wuhan",
+    cityEntries: [
+      { id: "entry-wuhan", visitId: "visit-wuhan", placeId: "wuhan", manuallyPlaced: false }
+    ],
+    overnightPlaceId: "wuhan",
+    items: [],
+    lodging: null,
+    manuallyEdited: false
+  });
+  const before = structuredClone(plan);
+
+  const result = reconcileRoutePlaces(plan, ["beijing"], { idFactory: ids() });
+  assert.deepEqual(result.blockedRemovals, []);
+  assert.deepEqual(routePlaceIds(result.plan), ["beijing"]);
+  assert.equal(result.plan.days.length, 1);
+  assert.deepEqual(plan, before);
+});
+
+test("creates a day when reconciling a route without existing anchors", () => {
+  const plan = createTripPlan({ placeIds: [], idFactory: ids() });
+  const result = reconcileRoutePlaces(plan, ["wuhan"], { idFactory: ids() });
+  assert.deepEqual(routePlaceIds(result.plan), ["wuhan"]);
+  assert.equal(result.plan.days.length, 1);
+  assert.equal(result.plan.days[0].manuallyEdited, false);
+  assert.equal(result.plan.days[0].cityEntries[0].manuallyPlaced, false);
+});
+
+test("recomputes the target day overnight place after route insertion", () => {
+  const plan = createTripPlan({ placeIds: ["beijing"], idFactory: ids() });
+  const result = reconcileRoutePlaces(plan, ["beijing", "wuhan"], { idFactory: ids() });
+  assert.equal(result.plan.days[0].overnightPlaceId, "wuhan");
+});
+
+test("rejects invalid trip plan roots", () => {
+  [null, undefined, "trip", [], {}, { days: null }].forEach((value) => {
+    assert.throws(
+      () => normalizeTripPlan(value),
+      { name: "TypeError", message: "行程文件格式无效" }
+    );
+  });
+});
+
+test("normalizes missing fields and filters unsupported items", () => {
+  const source = {
+    version: 99,
+    id: "",
+    name: "旅".repeat(65),
+    startDate: "2026-02-29",
+    pace: "rushed",
+    days: [{
+      cityEntries: [null, "beijing", {}, { placeId: 42, manuallyPlaced: "yes" }],
+      overnightPlaceId: "42",
+      items: [
+        null,
+        { id: "unsupported", type: "note" },
+        {
+          type: "transport",
+          fromPlaceId: 1,
+          toPlaceId: 42,
+          serviceNo: 99,
+          startTime: 800,
+          endTime: "09:00",
+          note: null,
+          endDayOffset: 2,
+          manuallyEdited: 1
+        },
+        {
+          type: "activity",
+          sourceType: "museum",
+          sourceId: 9,
+          placeId: 42,
+          title: "",
+          startTime: "10:00"
+        }
+      ],
+      lodging: { placeId: 42, name: 7, address: null, checkInTime: "15:00", checkOutTime: 1200 },
+      manuallyEdited: "yes"
+    }],
+    savedAt: 123
+  };
+  const before = structuredClone(source);
+
+  const result = normalizeTripPlan(source, { idFactory: ids() });
+  assert.equal(result.version, TRIP_PLAN_VERSION);
+  assert.match(result.id, /^trip-/);
+  assert.equal(result.name, "旅".repeat(60));
+  assert.equal(result.startDate, null);
+  assert.equal(result.pace, "standard");
+  assert.equal(Number.isNaN(Date.parse(result.savedAt)), false);
+  assert.deepEqual(Object.keys(result.days[0]).sort(), [
+    "cityEntries", "id", "items", "lodging", "manuallyEdited", "overnightPlaceId"
+  ]);
+  assert.equal(result.days[0].overnightPlaceId, "42");
+  assert.equal(result.days[0].manuallyEdited, true);
+  assert.equal(result.days[0].cityEntries.length, 1);
+  assert.equal(result.days[0].cityEntries[0].placeId, "42");
+  assert.equal(result.days[0].cityEntries[0].manuallyPlaced, true);
+  assert.match(result.days[0].cityEntries[0].id, /^city-entry-/);
+  assert.match(result.days[0].cityEntries[0].visitId, /^visit-/);
+
+  const [transport, activity] = result.days[0].items;
+  assert.deepEqual(Object.keys(transport).sort(), [
+    "endDayOffset", "endTime", "fromPlaceId", "id", "manuallyEdited", "note", "serviceNo", "startTime", "toPlaceId", "type"
+  ]);
+  assert.equal(transport.fromPlaceId, "1");
+  assert.equal(transport.toPlaceId, "42");
+  assert.equal(transport.serviceNo, "99");
+  assert.equal(transport.startTime, "");
+  assert.equal(transport.endTime, "09:00");
+  assert.equal(transport.note, "");
+  assert.equal(transport.endDayOffset, 0);
+  assert.equal(transport.manuallyEdited, true);
+  assert.deepEqual(Object.keys(activity).sort(), [
+    "endTime", "id", "manuallyEdited", "note", "placeId", "sourceId", "sourceType", "startTime", "title", "type"
+  ]);
+  assert.equal(activity.sourceType, "custom");
+  assert.equal(activity.sourceId, null);
+  assert.equal(activity.placeId, "42");
+  assert.equal(activity.title, "未命名活动");
+  assert.deepEqual(result.days[0].lodging, {
+    placeId: "42",
+    name: "7",
+    address: "",
+    checkInTime: "15:00",
+    checkOutTime: "1200",
+    note: ""
+  });
+  assert.deepEqual(source, before);
+});
+
+test("repairs non-string structure IDs and fills empty relationship fields", () => {
+  const result = normalizeTripPlan({
+    id: 9,
+    name: 10,
+    days: [{
+      id: 11,
+      cityEntries: [{ id: 12, visitId: 13, placeId: "beijing" }],
+      overnightPlaceId: 14,
+      items: [
+        { id: 15, type: "transport" },
+        { id: 16, type: "activity", sourceId: 17 }
+      ],
+      lodging: {}
+    }],
+    savedAt: "legacy-timestamp"
+  }, { idFactory: ids() });
+
+  assert.match(result.id, /^trip-/);
+  assert.equal(result.name, "我的旅行");
+  assert.equal(Number.isNaN(Date.parse(result.savedAt)), false);
+  assert.notEqual(result.savedAt, "legacy-timestamp");
+  assert.match(result.days[0].id, /^day-/);
+  assert.match(result.days[0].cityEntries[0].id, /^city-entry-/);
+  assert.match(result.days[0].cityEntries[0].visitId, /^visit-/);
+  assert.equal(result.days[0].overnightPlaceId, null);
+  assert.deepEqual(
+    {
+      fromPlaceId: result.days[0].items[0].fromPlaceId,
+      toPlaceId: result.days[0].items[0].toPlaceId,
+      serviceNo: result.days[0].items[0].serviceNo
+    },
+    { fromPlaceId: "", toPlaceId: "", serviceNo: "" }
+  );
+  assert.match(result.days[0].items[0].id, /^item-/);
+  assert.equal(result.days[0].items[1].sourceId, null);
+  assert.equal(result.days[0].items[1].placeId, "");
+  assert.equal(result.days[0].items[1].title, "未命名活动");
+  assert.deepEqual(result.days[0].lodging, {
+    placeId: "",
+    name: "",
+    address: "",
+    checkInTime: "",
+    checkOutTime: "",
+    note: ""
+  });
+});
+
+test("normalizes target IDs globally and assigns visits by route occurrence", () => {
+  const source = {
+    id: "   ",
+    days: [{
+      id: " day-shared ",
+      cityEntries: [
+        { id: " entry-shared ", visitId: " visit-shared ", placeId: "a" }
+      ],
+      items: [
+        { id: " item-shared ", type: "activity", placeId: "a" }
+      ]
+    }, {
+      id: "day-shared",
+      cityEntries: [
+        { id: "entry-shared", visitId: "ignored-adjacent", placeId: "a" },
+        { id: "   ", visitId: "visit-shared", placeId: "b" },
+        { id: "entry-shared", visitId: "visit-shared", placeId: "a" }
+      ],
+      items: [{ id: "item-shared", type: "transport", fromPlaceId: "a", toPlaceId: "b" }]
+    }]
+  };
+  const before = structuredClone(source);
+
+  const result = normalizeTripPlan(source, { idFactory: ids() });
+  const entries = result.days.flatMap((day) => day.cityEntries);
+  const items = result.days.flatMap((day) => day.items);
+  const dayIds = result.days.map((day) => day.id);
+  const entryIds = entries.map((entry) => entry.id);
+  const itemIds = items.map((item) => item.id);
+  assert.equal(result.id.trim().length > 0, true);
+  assert.equal(new Set(dayIds).size, dayIds.length);
+  assert.equal(new Set(entryIds).size, entryIds.length);
+  assert.equal(new Set(itemIds).size, itemIds.length);
+  [...dayIds, ...entryIds, ...itemIds].forEach((id) => {
+    assert.equal(id, id.trim());
+    assert.equal(id.length > 0, true);
+  });
+  assert.equal(dayIds[0], "day-shared");
+  assert.equal(entryIds[0], "entry-shared");
+  assert.equal(itemIds[0], "item-shared");
+  assert.equal(entries[0].visitId, entries[1].visitId);
+  assert.notEqual(entries[1].visitId, entries[2].visitId);
+  assert.notEqual(entries[2].visitId, entries[3].visitId);
+  assert.notEqual(entries[0].visitId, entries[3].visitId);
+  assert.deepEqual(source, before);
+});
+
+test("retries colliding generated IDs and fails when uniqueness is exhausted", () => {
+  const generated = ["day-1", "   ", "day-2"];
+  const result = normalizeTripPlan({
+    id: "trip",
+    days: [{ id: "day-1" }, { id: "day-1" }]
+  }, { idFactory: () => generated.shift() });
+  assert.deepEqual(result.days.map((day) => day.id), ["day-1", "day-2"]);
+  assert.deepEqual(generated, []);
+
+  assert.throws(
+    () => normalizeTripPlan({
+      id: "trip",
+      days: [{ id: "day-1" }, { id: "day-1" }]
+    }, { idFactory: () => "day-1" }),
+    TypeError
+  );
+});
+
+test("accepts only real strict calendar dates including years below 100", () => {
+  const normalizedDate = (startDate) => normalizeTripPlan({ startDate, days: [] }, { idFactory: ids() }).startDate;
+  ["2026-02-29", "1900-02-29", "2026-04-31", "2026-2-03", "2026-13-01", "not-a-date"].forEach((value) => {
+    assert.equal(normalizedDate(value), null);
+  });
+  ["2024-02-29", "2000-02-29", "0099-01-01"].forEach((value) => {
+    assert.equal(normalizedDate(value), value);
+  });
+});
+
+test("derives normalized dates below year 100 without remapping the century", () => {
+  const plan = normalizeTripPlan({
+    startDate: "0099-01-01",
+    days: [{}, {}]
+  }, { idFactory: ids() });
+  assert.equal(dayDate(plan, 0), "0099-01-01");
+  assert.equal(dayDate(plan, 1), "0099-01-02");
+});
+
+test("normalizes v2 trip data during migration", () => {
+  const source = {
+    version: 2,
+    id: 9,
+    name: null,
+    startDate: "2026-02-29",
+    pace: "rushed",
+    days: [{
+      id: 10,
+      cityEntries: [{ id: 11, visitId: 12, placeId: 13 }],
+      items: [{ id: "unsupported", type: "note" }],
+      lodging: "invalid"
+    }]
+  };
+  const before = structuredClone(source);
+
+  const result = migrateTripState(source, { idFactory: ids() });
+  assert.equal(result.version, TRIP_PLAN_VERSION);
+  assert.match(result.id, /^trip-/);
+  assert.equal(result.name, "我的旅行");
+  assert.equal(result.startDate, null);
+  assert.equal(result.pace, "standard");
+  assert.match(result.days[0].id, /^day-/);
+  assert.equal(result.days[0].cityEntries[0].placeId, "13");
+  assert.deepEqual(result.days[0].items, []);
+  assert.equal(result.days[0].lodging, null);
+  assert.deepEqual(source, before);
+});
+
+test("rejects malformed v2 snapshots instead of treating them as legacy data", () => {
+  [{ version: TRIP_PLAN_VERSION, days: null }, { version: TRIP_PLAN_VERSION }].forEach((source) => {
+    assert.throws(
+      () => migrateTripState(source, { idFactory: ids() }),
+      { name: "TypeError", message: "行程文件格式无效" }
+    );
+  });
+});
+
+test("rejects unsupported explicit trip versions without mutating snapshots", () => {
+  [3, "2", null].forEach((version) => {
+    const source = {
+      version,
+      id: "complete-trip",
+      days: [{
+        id: "complete-day",
+        cityEntries: [{ id: "complete-entry", visitId: "complete-visit", placeId: "wuhan" }]
+      }],
+      routes: [{ from: "beijing", to: "wuhan" }]
+    };
+    const before = structuredClone(source);
+
+    assert.throws(
+      () => migrateTripState(source, { idFactory: ids() }),
+      { name: "TypeError", message: "不支持的行程版本" }
+    );
+    assert.deepEqual(source, before);
+  });
+});
+
+test("migrates explicit v1 and unversioned legacy snapshots", () => {
+  [{
+    version: 1,
+    routes: [{ from: "beijing", to: "wuhan" }]
+  }, {
+    routes: [{ from: "beijing", to: "wuhan" }]
+  }].forEach((source) => {
+    const before = structuredClone(source);
+    const result = migrateTripState(source, { idFactory: ids() });
+
+    assert.equal(result.version, TRIP_PLAN_VERSION);
+    assert.deepEqual(routePlaceIds(result), ["beijing", "wuhan"]);
+    assert.deepEqual(source, before);
+  });
+});
+
+test("migrates a selected city when an old snapshot has no routes", () => {
+  const result = migrateTripState({ selectedCityId: "wuhan", tripPace: "relaxed" }, { idFactory: ids() });
+  assert.deepEqual(routePlaceIds(result), ["wuhan"]);
+  assert.equal(result.name, "我的旅行");
+  assert.equal(result.pace, "relaxed");
+
+  const empty = migrateTripState({}, { idFactory: ids() });
+  assert.deepEqual(empty.days, []);
+});
+
+test("canonicalizes saved timestamps and legacy pace values", () => {
+  const validTimestamp = normalizeTripPlan({
+    savedAt: "2026-07-13T20:00:00+08:00",
+    days: []
+  }, { idFactory: ids() });
+  assert.equal(validTimestamp.savedAt, "2026-07-13T12:00:00.000Z");
+
+  const invalidTimestamp = normalizeTripPlan({ savedAt: "not-a-date", days: [] }, { idFactory: ids() });
+  assert.equal(Number.isNaN(Date.parse(invalidTimestamp.savedAt)), false);
+  assert.notEqual(invalidTimestamp.savedAt, "not-a-date");
+
+  const migrated = migrateTripState({ selectedCityId: "wuhan", tripPace: "rushed" }, { idFactory: ids() });
+  assert.equal(migrated.pace, "standard");
+});
+
+test("compacts a trip without mutating or dropping user content", () => {
+  const plan = createTripPlan({ placeIds: ["beijing"], idFactory: ids() });
+  plan.savedAt = "2026-07-13T12:00:00.000Z";
+  plan.days[0].items.push({
+    id: "activity-1",
+    type: "activity",
+    placeId: "beijing",
+    title: "故宫",
+    note: "保留"
+  });
+  plan.days[0].lodging = { placeId: "beijing", name: "酒店", note: "高层" };
+  const before = structuredClone(plan);
+  const expected = structuredClone(plan);
+  delete expected.savedAt;
+
+  const result = compactTripPlan(plan);
+  assert.deepEqual(result, expected);
+  assert.equal(result.version, TRIP_PLAN_VERSION);
+  assert.notEqual(result.days, plan.days);
+  assert.deepEqual(plan, before);
+});
+
+test("uses a trip file only beyond the 12000 character boundary", () => {
+  assert.equal(shouldUseTripFile("x".repeat(12000)), false);
+  assert.equal(shouldUseTripFile("x".repeat(12001)), true);
+  [null, undefined, 12001, {}, [], new String("x".repeat(12001))].forEach((value) => {
+    assert.equal(shouldUseTripFile(value), false);
+  });
 });

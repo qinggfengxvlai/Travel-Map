@@ -1,6 +1,7 @@
 export const TRIP_PLAN_VERSION = 2;
 export const TRIP_STORAGE_KEY = "route-studio-trip-v2";
 export const LEGACY_TRIP_STORAGE_KEY = "route-studio-trip-v1";
+const VALID_TRIP_PACES = new Set(["relaxed", "standard", "compact"]);
 
 function defaultIdFactory(prefix) {
   return `${prefix}-${crypto.randomUUID()}`;
@@ -87,7 +88,9 @@ export function autoScheduleTrip({ placeIds, durations = {}, paceProfile, idFact
 export function dayDate(plan, dayIndex) {
   if (!plan.startDate) return null;
   const [year, month, day] = plan.startDate.split("-").map(Number);
-  const date = new Date(Date.UTC(year, month - 1, day + dayIndex));
+  const date = new Date(0);
+  date.setUTCFullYear(year, month - 1, day);
+  date.setUTCDate(date.getUTCDate() + dayIndex);
   return date.toISOString().slice(0, 10);
 }
 
@@ -104,6 +107,491 @@ function ensureValidOvernightPlace(day) {
 
 function itemReferencesPlace(item, placeIds) {
   return placeIds.has(item.placeId) || placeIds.has(item.fromPlaceId) || placeIds.has(item.toPlaceId);
+}
+
+function protectedDayIds(plan, placeId) {
+  const placeIds = new Set([placeId]);
+  const seenDayIds = new Set();
+  const dayIds = [];
+  plan.days.forEach((day) => {
+    const appearsOnEditedDay = day.manuallyEdited &&
+      day.cityEntries.some((entry) => entry.placeId === placeId);
+    const affectsLodging = day.lodging?.placeId === placeId;
+    const affectsItems = day.items.some((item) => itemReferencesPlace(item, placeIds));
+    if ((appearsOnEditedDay || affectsLodging || affectsItems) && !seenDayIds.has(day.id)) {
+      seenDayIds.add(day.id);
+      dayIds.push(day.id);
+    }
+  });
+  return dayIds;
+}
+
+function routeOccurrences(plan) {
+  const occurrences = [];
+  plan.days.forEach((day, dayIndex) => {
+    day.cityEntries.forEach((entry) => {
+      let occurrence = occurrences.at(-1);
+      if (!occurrence || occurrence.placeId !== entry.placeId) {
+        occurrence = { placeId: entry.placeId, entries: [] };
+        occurrences.push(occurrence);
+      }
+      occurrence.entries.push({ dayIndex, dayId: day.id, entry });
+    });
+  });
+  return occurrences;
+}
+
+function alignRouteOccurrences(current, requested) {
+  const lengths = Array.from(
+    { length: current.length + 1 },
+    () => Array(requested.length + 1).fill(0)
+  );
+  for (let currentIndex = current.length - 1; currentIndex >= 0; currentIndex -= 1) {
+    for (let requestedIndex = requested.length - 1; requestedIndex >= 0; requestedIndex -= 1) {
+      lengths[currentIndex][requestedIndex] = current[currentIndex].placeId === requested[requestedIndex]
+        ? lengths[currentIndex + 1][requestedIndex + 1] + 1
+        : Math.max(lengths[currentIndex + 1][requestedIndex], lengths[currentIndex][requestedIndex + 1]);
+    }
+  }
+
+  const matches = [];
+  let currentIndex = 0;
+  let requestedIndex = 0;
+  while (currentIndex < current.length && requestedIndex < requested.length) {
+    if (current[currentIndex].placeId === requested[requestedIndex]) {
+      matches.push({ currentIndex, requestedIndex });
+      currentIndex += 1;
+      requestedIndex += 1;
+    } else if (lengths[currentIndex + 1][requestedIndex] > lengths[currentIndex][requestedIndex + 1]) {
+      currentIndex += 1;
+    } else {
+      requestedIndex += 1;
+    }
+  }
+  return matches;
+}
+
+function occurrenceProtectedDayIds(plan, occurrence, candidateEntries) {
+  const dayIndexes = [...new Set(occurrence.entries.map(({ dayIndex }) => dayIndex))];
+  const affectedDayIndexes = new Set();
+  const placeIds = new Set([occurrence.placeId]);
+
+  dayIndexes.forEach((dayIndex) => {
+    const day = plan.days[dayIndex];
+    if (day.manuallyEdited) affectedDayIndexes.add(dayIndex);
+    const placeRemains = day.cityEntries.some((entry) =>
+      entry.placeId === occurrence.placeId && !candidateEntries.has(entry)
+    );
+    if (placeRemains) return;
+    if (day.lodging?.placeId === occurrence.placeId ||
+        day.items.some((item) => itemReferencesPlace(item, placeIds))) {
+      affectedDayIndexes.add(dayIndex);
+    }
+    const previousArrivals = previousArrivalReferences(plan, dayIndex, occurrence.placeId);
+    if (previousArrivals.length) {
+      affectedDayIndexes.add(dayIndex);
+      previousArrivals.forEach(({ dayIndex: arrivalDayIndex }) => affectedDayIndexes.add(arrivalDayIndex));
+    }
+  });
+
+  const seenDayIds = new Set();
+  return [...affectedDayIndexes]
+    .sort((left, right) => left - right)
+    .flatMap((dayIndex) => {
+      const dayId = plan.days[dayIndex].id;
+      if (seenDayIds.has(dayId)) return [];
+      seenDayIds.add(dayId);
+      return [dayId];
+    });
+}
+
+function normalizeRequestedPlaceIds(nextPlaceIds) {
+  if (!Array.isArray(nextPlaceIds)) throw new TypeError("路线地点格式无效");
+  const normalized = [];
+  for (const placeId of nextPlaceIds) {
+    if (typeof placeId !== "string" || !placeId.trim()) {
+      throw new TypeError("路线地点格式无效");
+    }
+    normalized.push(placeId.trim());
+  }
+  return normalized.filter(
+    (placeId, index) => index === 0 || normalized[index - 1] !== placeId
+  );
+}
+
+export function reconcileRoutePlaces(
+  plan,
+  nextPlaceIds,
+  { idFactory = defaultIdFactory, allowRemovalIds = new Set() } = {}
+) {
+  const requested = normalizeRequestedPlaceIds(nextPlaceIds);
+  const next = cloneTripPlan(plan);
+  const currentOccurrences = routeOccurrences(next);
+  const matches = alignRouteOccurrences(currentOccurrences, requested);
+  const matchedCurrentIndexes = new Set(matches.map(({ currentIndex }) => currentIndex));
+  const requestedAnchors = Array(requested.length).fill(null);
+  matches.forEach(({ currentIndex, requestedIndex }) => {
+    const occurrence = currentOccurrences[currentIndex];
+    requestedAnchors[requestedIndex] = {
+      firstEntryId: occurrence.entries[0].entry.id,
+      lastEntryId: occurrence.entries.at(-1).entry.id
+    };
+  });
+
+  const requestedIds = new Set(requested);
+  const unmatchedRetainedOccurrences = currentOccurrences
+    .map((occurrence, currentIndex) => ({ occurrence, currentIndex }))
+    .filter(({ occurrence, currentIndex }) =>
+      !matchedCurrentIndexes.has(currentIndex) && requestedIds.has(occurrence.placeId)
+    );
+  const candidateEntriesByPlace = new Map();
+  unmatchedRetainedOccurrences.forEach(({ occurrence }) => {
+    const candidateEntries = candidateEntriesByPlace.get(occurrence.placeId) || new Set();
+    occurrence.entries.forEach(({ entry }) => candidateEntries.add(entry));
+    candidateEntriesByPlace.set(occurrence.placeId, candidateEntries);
+  });
+  const fullRemovalPlaceIds = new Set();
+  const processedFullRemovals = new Set();
+  const blockedDayIdsByPlace = new Map();
+  const originalDayIds = next.days.map((day) => day.id);
+  const entriesToRemove = new Set();
+  const localRemovalTargets = new Map();
+  const addBlockedRemoval = (placeId, dayIds) => {
+    const blockedDayIds = blockedDayIdsByPlace.get(placeId) || new Set();
+    dayIds.forEach((dayId) => blockedDayIds.add(dayId));
+    blockedDayIdsByPlace.set(placeId, blockedDayIds);
+  };
+
+  currentOccurrences.forEach(({ placeId }) => {
+    if (requestedIds.has(placeId) || processedFullRemovals.has(placeId)) return;
+    processedFullRemovals.add(placeId);
+    const dayIds = protectedDayIds(next, placeId);
+    if (dayIds.length && !allowRemovalIds.has(placeId)) {
+      addBlockedRemoval(placeId, dayIds);
+      return;
+    }
+    fullRemovalPlaceIds.add(placeId);
+  });
+
+  unmatchedRetainedOccurrences.forEach(({ occurrence }) => {
+    const dayIds = occurrenceProtectedDayIds(
+      next,
+      occurrence,
+      candidateEntriesByPlace.get(occurrence.placeId)
+    );
+    if (dayIds.length && !allowRemovalIds.has(occurrence.placeId)) {
+      addBlockedRemoval(occurrence.placeId, dayIds);
+      return;
+    }
+    occurrence.entries.forEach(({ dayIndex, entry }) => {
+      entriesToRemove.add(entry);
+      const placeIds = localRemovalTargets.get(dayIndex) || new Set();
+      placeIds.add(occurrence.placeId);
+      localRemovalTargets.set(dayIndex, placeIds);
+    });
+  });
+
+  const blockedRemovals = [...blockedDayIdsByPlace].map(([placeId, blockedDayIds]) => ({
+    placeId,
+    dayIds: originalDayIds.filter((dayId, index) =>
+      blockedDayIds.has(dayId) && originalDayIds.indexOf(dayId) === index
+    )
+  }));
+  if (blockedRemovals.length) return { plan, blockedRemovals };
+
+  next.days.forEach((day) => {
+    day.cityEntries = day.cityEntries.filter((entry) =>
+      !fullRemovalPlaceIds.has(entry.placeId) && !entriesToRemove.has(entry)
+    );
+  });
+
+  const cleanupTargets = new Map();
+  localRemovalTargets.forEach((placeIds, dayIndex) => {
+    const cleanupPlaceIds = new Set(
+      [...placeIds].filter((placeId) =>
+        !next.days[dayIndex].cityEntries.some((entry) => entry.placeId === placeId)
+      )
+    );
+    if (cleanupPlaceIds.size) cleanupTargets.set(dayIndex, cleanupPlaceIds);
+  });
+  const arrivalItemsByDay = new Map();
+  cleanupTargets.forEach((placeIds, targetDayIndex) => {
+    placeIds.forEach((placeId) => {
+      previousArrivalReferences(next, targetDayIndex, placeId).forEach(({ dayIndex, item }) => {
+        const items = arrivalItemsByDay.get(dayIndex) || new Set();
+        items.add(item);
+        arrivalItemsByDay.set(dayIndex, items);
+      });
+    });
+  });
+  next.days.forEach((day, dayIndex) => {
+    const cleanupPlaceIds = new Set([
+      ...fullRemovalPlaceIds,
+      ...(cleanupTargets.get(dayIndex) || [])
+    ]);
+    if (cleanupPlaceIds.size) {
+      day.items = day.items.filter((item) => !itemReferencesPlace(item, cleanupPlaceIds));
+      if (day.lodging && cleanupPlaceIds.has(day.lodging.placeId)) day.lodging = null;
+    }
+    const arrivalItems = arrivalItemsByDay.get(dayIndex);
+    if (arrivalItems) day.items = day.items.filter((item) => !arrivalItems.has(item));
+    ensureValidOvernightPlace(day);
+  });
+  next.days = next.days.filter((day) =>
+    day.cityEntries.length || day.items.length || day.lodging
+  );
+
+  requested.forEach((placeId, requestedIndex) => {
+    if (requestedAnchors[requestedIndex]) return;
+
+    let target = null;
+    let insertionIndex = 0;
+    for (let index = requestedIndex - 1; index >= 0; index -= 1) {
+      const anchor = requestedAnchors[index];
+      const predecessor = anchor ? locateEntry(next, anchor.lastEntryId) : null;
+      if (!predecessor) continue;
+      target = next.days[predecessor.dayIndex];
+      insertionIndex = predecessor.entryIndex + 1;
+      break;
+    }
+    if (!target) {
+      for (let index = requestedIndex + 1; index < requested.length; index += 1) {
+        const anchor = requestedAnchors[index];
+        const successor = anchor ? locateEntry(next, anchor.firstEntryId) : null;
+        if (!successor) continue;
+        target = next.days[successor.dayIndex];
+        insertionIndex = successor.entryIndex;
+        break;
+      }
+    }
+    if (!target) {
+      target = blankDay(idFactory);
+      next.days.push(target);
+    }
+
+    const visitId = idFactory("visit");
+    const entryId = idFactory("city-entry");
+    target.cityEntries.splice(insertionIndex, 0, {
+      id: entryId,
+      visitId,
+      placeId,
+      manuallyPlaced: false
+    });
+    target.overnightPlaceId = target.cityEntries.at(-1)?.placeId ?? null;
+    requestedAnchors[requestedIndex] = { firstEntryId: entryId, lastEntryId: entryId };
+  });
+
+  return { plan: next, blockedRemovals };
+}
+
+function isRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function identifierOrNull(value) {
+  if (value === null || value === undefined) return null;
+  const identifier = String(value);
+  return identifier ? identifier : null;
+}
+
+function trimmedId(value) {
+  if (typeof value !== "string") return null;
+  const trimmed = value.trim();
+  return trimmed || null;
+}
+
+function createUniqueIdAllocator(idFactory, prefix) {
+  const usedIds = new Set();
+  return (value) => {
+    const existingId = trimmedId(value);
+    if (existingId && !usedIds.has(existingId)) {
+      usedIds.add(existingId);
+      return existingId;
+    }
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      const generatedId = trimmedId(idFactory(prefix));
+      if (!generatedId || usedIds.has(generatedId)) continue;
+      usedIds.add(generatedId);
+      return generatedId;
+    }
+    throw new TypeError("无法生成唯一行程 ID");
+  };
+}
+
+function stringValue(value) {
+  return value === null || value === undefined ? "" : String(value);
+}
+
+function stringField(value) {
+  return typeof value === "string" ? value : "";
+}
+
+function validStartDate(value) {
+  if (typeof value !== "string") return null;
+  const match = /^(\d{4})-(\d{2})-(\d{2})$/.exec(value);
+  if (!match) return null;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  if (year < 1 || month < 1 || month > 12) return null;
+  const leapYear = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const daysInMonth = [31, leapYear ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return day >= 1 && day <= daysInMonth[month - 1] ? value : null;
+}
+
+function normalizedSavedAt(value) {
+  const timestamp = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(timestamp) ? new Date(timestamp).toISOString() : new Date().toISOString();
+}
+
+function normalizeTripItem(item, allocateItemId) {
+  if (!isRecord(item) || (item.type !== "transport" && item.type !== "activity")) return null;
+  const common = {
+    id: allocateItemId(item.id),
+    type: item.type,
+    startTime: stringField(item.startTime),
+    endTime: stringField(item.endTime),
+    note: stringField(item.note),
+    manuallyEdited: Boolean(item.manuallyEdited)
+  };
+  if (item.type === "transport") {
+    return {
+      ...common,
+      fromPlaceId: stringValue(item.fromPlaceId),
+      toPlaceId: stringValue(item.toPlaceId),
+      serviceNo: stringValue(item.serviceNo),
+      endDayOffset: item.endDayOffset === 1 ? 1 : 0
+    };
+  }
+  const sourceTypes = new Set(["landmark", "food", "custom", "free"]);
+  return {
+    ...common,
+    sourceType: sourceTypes.has(item.sourceType) ? item.sourceType : "custom",
+    sourceId: typeof item.sourceId === "string" ? item.sourceId : null,
+    placeId: stringValue(item.placeId),
+    title: stringValue(item.title) || "未命名活动"
+  };
+}
+
+function normalizeLodging(lodging) {
+  if (!isRecord(lodging)) return null;
+  return {
+    placeId: stringValue(lodging.placeId),
+    name: stringValue(lodging.name),
+    address: stringValue(lodging.address),
+    checkInTime: stringValue(lodging.checkInTime),
+    checkOutTime: stringValue(lodging.checkOutTime),
+    note: stringValue(lodging.note)
+  };
+}
+
+export function normalizeTripPlan(data, { idFactory = defaultIdFactory } = {}) {
+  if (!isRecord(data) || !Array.isArray(data.days)) {
+    throw new TypeError("行程文件格式无效");
+  }
+  const allocateTripId = createUniqueIdAllocator(idFactory, "trip");
+  const allocateDayId = createUniqueIdAllocator(idFactory, "day");
+  const allocateEntryId = createUniqueIdAllocator(idFactory, "city-entry");
+  const allocateItemId = createUniqueIdAllocator(idFactory, "item");
+  const allocateVisitId = createUniqueIdAllocator(idFactory, "visit");
+  const tripId = allocateTripId(data.id);
+  const pace = VALID_TRIP_PACES.has(data.pace)
+    ? data.pace
+    : "standard";
+  const name = typeof data.name === "string" ? data.name.slice(0, 60) : "我的旅行";
+  let hasPreviousEntry = false;
+  let previousPlaceId = null;
+  let occurrenceVisitId = null;
+  const days = data.days.map((candidate) => {
+    const day = isRecord(candidate) ? candidate : {};
+    const dayId = allocateDayId(day.id);
+    const cityEntries = (Array.isArray(day.cityEntries) ? day.cityEntries : []).flatMap((entry) => {
+      if (!isRecord(entry)) return [];
+      const placeId = identifierOrNull(entry.placeId);
+      if (placeId === null) return [];
+      if (!hasPreviousEntry || previousPlaceId !== placeId) {
+        occurrenceVisitId = allocateVisitId(entry.visitId);
+      }
+      hasPreviousEntry = true;
+      previousPlaceId = placeId;
+      return [{
+        id: allocateEntryId(entry.id),
+        visitId: occurrenceVisitId,
+        placeId,
+        manuallyPlaced: Boolean(entry.manuallyPlaced)
+      }];
+    });
+    const items = (Array.isArray(day.items) ? day.items : [])
+      .map((item) => normalizeTripItem(item, allocateItemId))
+      .filter(Boolean);
+    return {
+      id: dayId,
+      cityEntries,
+      overnightPlaceId: typeof day.overnightPlaceId === "string" ? day.overnightPlaceId : null,
+      items,
+      lodging: normalizeLodging(day.lodging),
+      manuallyEdited: Boolean(day.manuallyEdited)
+    };
+  });
+  return {
+    version: TRIP_PLAN_VERSION,
+    id: tripId,
+    name,
+    startDate: validStartDate(data.startDate),
+    pace,
+    days,
+    savedAt: normalizedSavedAt(data.savedAt)
+  };
+}
+
+export function migrateTripState(data, options = {}) {
+  const idFactory = options.idFactory ?? defaultIdFactory;
+  if (isRecord(data) && Object.hasOwn(data, "version")) {
+    if (data.version === TRIP_PLAN_VERSION) {
+      return normalizeTripPlan(data, { idFactory });
+    }
+    if (data.version !== 1) throw new TypeError("不支持的行程版本");
+  }
+
+  const snapshot = isRecord(data) ? data : {};
+  const placeIds = [];
+  if (Array.isArray(snapshot.routes) && snapshot.routes.length) {
+    const firstRoute = isRecord(snapshot.routes[0]) ? snapshot.routes[0] : {};
+    const firstPlaceId = identifierOrNull(firstRoute.from);
+    if (firstPlaceId !== null) placeIds.push(firstPlaceId);
+    snapshot.routes.forEach((route) => {
+      const placeId = identifierOrNull(isRecord(route) ? route.to : null);
+      if (placeId !== null) placeIds.push(placeId);
+    });
+  } else {
+    const selectedCityId = identifierOrNull(snapshot.selectedCityId);
+    if (selectedCityId !== null) placeIds.push(selectedCityId);
+  }
+
+  const paceProfile = {
+    dailyTravelLimitSeconds: 4 * 3600,
+    maxDailyPlaces: 3,
+    ...(isRecord(options.paceProfile) ? options.paceProfile : {})
+  };
+  return autoScheduleTrip({
+    placeIds,
+    paceProfile,
+    idFactory,
+    metadata: {
+      pace: VALID_TRIP_PACES.has(snapshot.tripPace) ? snapshot.tripPace : "standard",
+      name: "我的旅行"
+    }
+  });
+}
+
+export function compactTripPlan(plan) {
+  const compact = cloneTripPlan(plan);
+  delete compact.savedAt;
+  return compact;
+}
+
+export function shouldUseTripFile(url) {
+  return typeof url === "string" && url.length > 12000;
 }
 
 function locateEntry(plan, entryId) {
@@ -159,20 +647,15 @@ function absoluteInterval(item, dayIndex) {
 }
 
 function previousArrivalReferences(plan, targetDayIndex, placeId) {
-  const dayStart = targetDayIndex * 1440;
-  const dayEnd = dayStart + 1440;
-  const references = [];
-  plan.days.forEach((day, dayIndex) => {
-    if (dayIndex >= targetDayIndex) return;
-    day.items.forEach((item) => {
-      if (item.type !== "transport" || item.toPlaceId !== placeId) return;
-      const interval = absoluteInterval(item, dayIndex);
-      if (interval && interval.start < dayStart && interval.end >= dayStart && interval.end < dayEnd) {
-        references.push({ dayIndex, item });
-      }
-    });
-  });
-  return references;
+  const dayIndex = targetDayIndex - 1;
+  if (dayIndex < 0) return [];
+  return plan.days[dayIndex].items.flatMap((item) =>
+    item.type === "transport" &&
+    item.toPlaceId === placeId &&
+    Number(item.endDayOffset) === 1
+      ? [{ dayIndex, item }]
+      : []
+  );
 }
 
 function intervalUnionMinutes(intervals) {
