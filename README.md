@@ -193,12 +193,22 @@ exports/wechat_articles/
 
 ```powershell
 node scripts\build_wechat_food_index.js
+node scripts\build_lazy_map_data.js
 ```
 
-该命令会读取 `exports/wechat_articles/*.json`，自动匹配城市/区县，生成：
+第一条命令会读取 `exports/wechat_articles/*.json`，自动匹配城市/区县，生成：
 
 ```text
 data/wechat-food-articles.json
 ```
 
-地图会读取这个索引，在城市详情中显示“食行记”文章点、文章卡片和本地图文链接。索引会优先使用已经生成的 PDF；如果还没有 PDF，则自动使用 `readers/` 里的 HTML 阅读页。
+第二条命令会把区县和食行记文章拆成首屏 summary 与按城市加载的分片：
+
+```text
+data/counties-summary.json
+data/counties/by-city/
+data/wechat-food-summary.json
+data/food-articles/by-city/
+```
+
+地图首屏读取 summary，在城市详情中再加载对应城市分片，显示“食行记”文章点、文章卡片和本地图文链接。索引会优先使用已经生成的 PDF；如果还没有 PDF，则自动使用 `readers/` 里的 HTML 阅读页。
