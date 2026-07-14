@@ -1,3 +1,53 @@
+import {
+  LEGACY_TRIP_STORAGE_KEY,
+  TRIP_PLAN_VERSION,
+  TRIP_STORAGE_KEY,
+  applyTripCommand,
+  autoScheduleTrip,
+  createTripPlan,
+  dayDate,
+  migrateTripState,
+  normalizeTripPlan,
+  reconcileRoutePlaces,
+  resolveTripPace,
+  resolveTripTransportMode,
+  routePlaceIds,
+  shouldUseTripFile,
+  validateTripPlan
+} from "./trip-plan.js";
+import {
+  LEGACY_TRIP_BACKUP_KEY,
+  backupLegacyTripRaw,
+  canExportTripFile,
+  captureTripArchiveSnapshot,
+  clearTripArchive,
+  createLazyStorageAdapter,
+  finalizeLegacyMigration,
+  isLegacyTripPayload,
+  legacyMigrationPending,
+  readTripRecoveryCandidates,
+  restoreTripArchiveSnapshot,
+  safeTripNameForFile,
+  shareUrlForTrip,
+  tripFileExportPayload,
+  tripFileName,
+  tripFileText,
+  writeTripPlanV2
+} from "./trip-archive.js";
+import {
+  buildGuideModel,
+  buildMarkdownGuide,
+  buildPrintableHtml
+} from "./guide-export.js";
+import {
+  commandForTripItemForm,
+  mountTripEditor,
+  renderTripEditorMarkup,
+  restoreTripEditorFocus
+} from "./trip-editor.js";
+
+const tripArchiveStorage = createLazyStorageAdapter(() => window.localStorage);
+
 const labels = {
   chooseStart: "\u9009\u62e9\u51fa\u53d1\u57ce\u5e02",
   chooseHint: "\u70b9\u51fb\u4e2d\u56fd\u5730\u56fe\u4e0a\u7684\u5706\u5f62\u57ce\u5e02\u5750\u6807\u4f5c\u4e3a\u8d77\u70b9\u3002",
@@ -66,7 +116,10 @@ const CITY_CLICK_DELAY_MS = 180;
 const DAILY_TRAVEL_LIMIT_SECONDS = 4 * 60 * 60;
 const MAX_DAILY_PLACES = 3;
 const CITY_PLAY_WINDOW_SECONDS = 10 * 60 * 60;
-const TRIP_STORAGE_KEY = "route-studio-trip-v1";
+const DEFAULT_TRIP_NAME = "\u6211\u7684\u65c5\u884c";
+let legacyTripBackupPending = false;
+let lastTripPersistenceResult = { stored: false, hashCleared: true };
+let emergencyLegacyTripRaw = null;
 
 const landmarkCatalog = {
   beijing: [
@@ -418,6 +471,9 @@ const state = {
   selectedCityId: null,
   transportMode: "highspeed",
   tripPace: "standard",
+  tripPlan: null,
+  tripHistory: [],
+  tripEditorDestroy: null,
   viewMode: "china",
   activeCityViewId: null,
   activeDistrictBoundaryCount: 0,
@@ -476,7 +532,11 @@ const clearBtn = document.querySelector("#clearBtn");
 const resetViewBtn = document.querySelector("#resetViewBtn");
 const saveTripBtn = document.querySelector("#saveTripBtn");
 const shareTripBtn = document.querySelector("#shareTripBtn");
-const exportBtn = document.querySelector("#exportBtn");
+const tripImportBtn = document.querySelector("#tripImportBtn");
+const tripImportInput = document.querySelector("#tripImportInput");
+const exportTripFileBtn = document.querySelector("#exportTripFileBtn");
+const exportMarkdownBtn = document.querySelector("#exportMarkdownBtn");
+const exportHtmlBtn = document.querySelector("#exportHtmlBtn");
 const citySearch = document.querySelector("#citySearch");
 const clearSearchBtn = document.querySelector("#clearSearchBtn");
 const searchResults = document.querySelector("#searchResults");
@@ -491,8 +551,24 @@ const foodArticleList = document.querySelector("#foodArticleList");
 const foodEmptyState = document.querySelector("#foodEmptyState");
 const itineraryMeta = document.querySelector("#itineraryMeta");
 const itineraryList = document.querySelector("#itineraryList");
+const tripNameInput = document.querySelector("#tripNameInput");
+const tripStartDateInput = document.querySelector("#tripStartDateInput");
+const autoScheduleBtn = document.querySelector("#autoScheduleBtn");
+const undoTripEditBtn = document.querySelector("#undoTripEditBtn");
+const tripEditorRoot = document.querySelector("#tripEditorRoot");
 const itineraryEmptyState = document.querySelector("#itineraryEmptyState");
 const tripHealth = document.querySelector("#tripHealth");
+const tripItemDialog = document.querySelector("#tripItemDialog");
+const tripItemForm = document.querySelector("#tripItemForm");
+const tripItemDialogTitle = document.querySelector("#tripItemDialogTitle");
+const tripItemTypeLabel = document.querySelector("#tripItemTypeLabel");
+const tripItemTitleLabel = document.querySelector("#tripItemTitleLabel");
+const tripItemStartTimeLabel = document.querySelector("#tripItemStartTimeLabel");
+const tripItemEndTimeLabel = document.querySelector("#tripItemEndTimeLabel");
+const tripItemPlaceId = document.querySelector("#tripItemPlaceId");
+const tripItemTitle = document.querySelector("#tripItemTitle");
+const tripLandmarkOptions = document.querySelector("#tripLandmarkOptions");
+const tripItemCancelBtn = document.querySelector("#tripItemCancelBtn");
 const tripArchiveStatus = document.querySelector("#tripArchiveStatus");
 const appShell = document.querySelector(".app-shell");
 const mobileViewButtons = Array.from(document.querySelectorAll("[data-mobile-view]"));
@@ -1177,6 +1253,399 @@ function curvedRoutePoints(from, to) {
   });
 }
 
+function isValidRouteId(routeId) {
+  return (Number.isSafeInteger(routeId) && routeId > 0) ||
+    (typeof routeId === "string" && routeId.trim().length > 0);
+}
+
+function syncRoutesFromTripPlan() {
+  const placeIds = state.tripPlan ? routePlaceIds(state.tripPlan) : [];
+  const previousRoutes = state.routes;
+  const claimedRoutes = new Set();
+  const claimedRouteIds = new Set();
+  const reservedRouteIds = new Set(
+    previousRoutes.map((route) => route?.id).filter(isValidRouteId)
+  );
+  const largestNumericId = previousRoutes.reduce(
+    (largest, route) => Number.isSafeInteger(route?.id) ? Math.max(largest, route.id) : largest,
+    0
+  );
+  state.nextRouteId = Math.max(
+    Number.isSafeInteger(state.nextRouteId) && state.nextRouteId > 0 ? state.nextRouteId : 1,
+    largestNumericId + 1
+  );
+
+  const allocateRouteId = () => {
+    while (reservedRouteIds.has(state.nextRouteId)) state.nextRouteId += 1;
+    const routeId = state.nextRouteId;
+    state.nextRouteId += 1;
+    reservedRouteIds.add(routeId);
+    return routeId;
+  };
+  const routesToEstimate = [];
+  const nextRoutes = placeIds.slice(1).map((to, index) => {
+    const from = placeIds[index];
+    const reusable = previousRoutes.find((route) =>
+      !claimedRoutes.has(route) &&
+      isValidRouteId(route?.id) &&
+      !claimedRouteIds.has(route.id) &&
+      route.from === from &&
+      route.to === to &&
+      route.transportMode === state.transportMode
+    );
+    if (reusable) {
+      claimedRoutes.add(reusable);
+      claimedRouteIds.add(reusable.id);
+      return reusable;
+    }
+
+    const route = {
+      id: allocateRouteId(),
+      from,
+      to,
+      status: "loading",
+      distance: null,
+      duration: null,
+      fallback: false,
+      error: null,
+      transportMode: state.transportMode,
+      transportLabel: transportProfile().label
+    };
+    claimedRouteIds.add(route.id);
+    routesToEstimate.push(route);
+    return route;
+  });
+
+  state.routes = nextRoutes;
+  state.selectedCityId = placeIds.at(-1) ?? null;
+  routesToEstimate.forEach((route) => calculateRouteMetrics(route));
+}
+
+function commitTripPlan(nextPlan, {
+  recordHistory = true,
+  message = "\u5df2\u81ea\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002",
+  focusToken = null,
+  completeLegacyMigration = true
+} = {}) {
+  if (recordHistory && state.tripPlan && state.tripPlan !== nextPlan) {
+    state.tripHistory.push(structuredClone(state.tripPlan));
+  }
+  state.tripHistory = state.tripHistory.slice(-20);
+  state.tripPlan = nextPlan;
+  state.tripPace = resolveTripPace(nextPlan, state.tripPace);
+  state.transportMode = resolveTripTransportMode(nextPlan);
+  syncRoutesFromTripPlan();
+  renderRoutes();
+  renderPanel();
+  if (focusToken) {
+    restoreTripEditorFocus(tripEditorRoot, focusToken);
+    window.requestAnimationFrame(() => restoreTripEditorFocus(tripEditorRoot, focusToken));
+  }
+  const persisted = persistTripState(message);
+  if (persisted && completeLegacyMigration) finalizeLegacyTripBackup(message);
+  return persisted;
+}
+
+function tripIdentifier(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function affectedTripDayLabels(plan, dayIds) {
+  const uniqueDayIds = [...new Set(Array.isArray(dayIds) ? dayIds : [])];
+  return uniqueDayIds.flatMap((dayId) => {
+    const dayIndex = plan.days.findIndex((day) => day.id === dayId);
+    if (dayIndex < 0) return [];
+    let date = null;
+    try {
+      date = dayDate(plan, dayIndex);
+    } catch {
+      date = null;
+    }
+    return [`\u7b2c ${dayIndex + 1} \u5929${date ? `\uff08${date}\uff09` : ""}`];
+  });
+}
+
+function handleTripCommand(command, focusToken) {
+  if (!state.tripPlan || !command || typeof command !== "object" || Array.isArray(command)) return false;
+  let result = applyTripCommand(state.tripPlan, command);
+  if (result.requiresConfirmation) {
+    const labels = affectedTripDayLabels(state.tripPlan, result.affectedDayIds);
+    const target = labels.length ? labels.join("\u3001") : "\u76f8\u5173\u65e5\u671f";
+    const confirmationMessage = result.confirmationReason === "cleanup-associated-content"
+      ? `\u79fb\u52a8\u57ce\u5e02\u4f1a\u6e05\u7406${target}\u4e2d\u4e0e\u8be5\u57ce\u5e02\u5173\u8054\u7684\u4ea4\u901a\u3001\u6d3b\u52a8\u6216\u4f4f\u5bbf\u5185\u5bb9\uff0c\u662f\u5426\u7ee7\u7eed\uff1f`
+      : `\u6b64\u64cd\u4f5c\u4f1a\u5f71\u54cd${target}\u7684\u4ea4\u901a\u3001\u6d3b\u52a8\u6216\u4f4f\u5bbf\u5185\u5bb9\uff0c\u662f\u5426\u7ee7\u7eed\uff1f`;
+    const confirmed = window.confirm(confirmationMessage);
+    if (!confirmed) return false;
+    result = applyTripCommand(state.tripPlan, command, { force: true });
+  }
+  if (!result.changed) {
+    if (result.blockedReason === "item-place-mismatch") {
+      updateArchiveStatus("\u9879\u76ee\u4e0e\u76ee\u6807\u65e5\u671f\u7684\u57ce\u5e02\u4e0d\u5339\u914d\uff0c\u672a\u6267\u884c\u79fb\u52a8\u3002", "error");
+    }
+    return false;
+  }
+  commitTripPlan(result.plan, { focusToken });
+  return true;
+}
+
+function tripFormControl(name) {
+  return tripItemForm?.elements?.namedItem(name) ?? null;
+}
+
+function setTripFormValue(name, value) {
+  const control = tripFormControl(name);
+  if (!control) return;
+  if (control.type === "checkbox") {
+    control.checked = value === 1 || value === "1" || value === true;
+    return;
+  }
+  control.value = value === null || value === undefined ? "" : String(value);
+}
+
+function tripDayPlaceIds(day) {
+  const placeIds = [];
+  (Array.isArray(day?.cityEntries) ? day.cityEntries : []).forEach((entry) => {
+    const placeId = tripIdentifier(entry?.placeId);
+    if (placeId && !placeIds.includes(placeId)) placeIds.push(placeId);
+  });
+  return placeIds;
+}
+
+function populateTripPlaceSelect(control, placeIds, preferredPlaceId) {
+  if (!control) return "";
+  const options = placeIds.map((placeId) => {
+    const option = document.createElement("option");
+    option.value = placeId;
+    option.textContent = placeById(placeId)?.name || placeId;
+    return option;
+  });
+  control.replaceChildren(...options);
+  const preferred = tripIdentifier(preferredPlaceId);
+  const selected = preferred && placeIds.includes(preferred) ? preferred : (placeIds[0] || "");
+  control.value = selected;
+  return selected;
+}
+
+function landmarkNamesForPlace(placeId) {
+  const place = placeById(placeId);
+  const city = cityForPlace(place);
+  if (!city) return [];
+  const cacheKey = state.cityAdcodes.get(city.id) || city.id;
+  const cached = state.landmarkCache.get(cacheKey) || [];
+  return uniqueByName(
+    [...cityLandmarks(city), ...cached]
+      .map((landmark) => typeof landmark?.name === "string" ? landmark.name.trim() : "")
+      .filter(Boolean)
+  );
+}
+
+function renderTripLandmarkOptions(placeId) {
+  const names = landmarkNamesForPlace(placeId);
+  if (tripLandmarkOptions) {
+    tripLandmarkOptions.replaceChildren(...names.map((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      return option;
+    }));
+  }
+  return names;
+}
+
+function configureTripItemForm(type) {
+  const labels = {
+    transport: { type: "\u4ea4\u901a", title: "\u8f66\u6b21\u6216\u73ed\u6b21", start: "\u51fa\u53d1\u65f6\u95f4", end: "\u5230\u8fbe\u65f6\u95f4" },
+    activity: { type: "\u6d3b\u52a8", title: "\u6d3b\u52a8\u6807\u9898", start: "\u5f00\u59cb\u65f6\u95f4", end: "\u7ed3\u675f\u65f6\u95f4" },
+    lodging: { type: "\u4f4f\u5bbf", title: "\u4f4f\u5bbf\u540d\u79f0", start: "\u5165\u4f4f\u65f6\u95f4", end: "\u9000\u623f\u65f6\u95f4" }
+  }[type];
+  if (!labels || !tripItemForm) return false;
+  setTripFormValue("type", type);
+  if (tripItemTypeLabel) tripItemTypeLabel.textContent = labels.type;
+  if (tripItemTitleLabel) tripItemTitleLabel.textContent = labels.title;
+  if (tripItemStartTimeLabel) tripItemStartTimeLabel.textContent = labels.start;
+  if (tripItemEndTimeLabel) tripItemEndTimeLabel.textContent = labels.end;
+  tripItemForm.querySelectorAll("[data-trip-types]").forEach((field) => {
+    const supported = (field.dataset.tripTypes || "").split(/\s+/).includes(type);
+    field.hidden = !supported;
+    field.querySelectorAll("input, select, textarea").forEach((control) => {
+      control.disabled = !supported;
+    });
+  });
+  if (tripItemTitle) {
+    if (type === "activity") tripItemTitle.setAttribute("list", "tripLandmarkOptions");
+    else tripItemTitle.removeAttribute("list");
+  }
+  if (type !== "activity" && tripLandmarkOptions) tripLandmarkOptions.replaceChildren();
+  return true;
+}
+
+function closeTripItemDialog(returnValue = "cancel") {
+  if (!tripItemDialog) return;
+  if (tripItemDialog.open && typeof tripItemDialog.close === "function") {
+    tripItemDialog.close(returnValue);
+  } else {
+    tripItemDialog.removeAttribute("open");
+  }
+}
+
+function openTripItemDialog(request = {}) {
+  if (!tripItemDialog || !tripItemForm || !state.tripPlan) return;
+  const dayId = tripIdentifier(request.dayId);
+  const day = state.tripPlan.days.find((candidate) => candidate.id === dayId);
+  if (!day) return;
+  const placeIds = tripDayPlaceIds(day);
+  if (!placeIds.length) {
+    updateArchiveStatus("\u5f53\u5929\u6ca1\u6709\u53ef\u9009\u5730\u70b9\uff0c\u8bf7\u5148\u5b89\u6392\u57ce\u5e02\u3002", "error");
+    return;
+  }
+
+  let type;
+  let item = null;
+  if (request.action === "add-transport") type = "transport";
+  else if (request.action === "add-activity") type = "activity";
+  else if (request.action === "edit-lodging") type = "lodging";
+  else if (request.action === "edit-item") {
+    const itemId = tripIdentifier(request.itemId);
+    item = day.items.find((candidate) => candidate.id === itemId) || null;
+    if (!item || (item.type !== "transport" && item.type !== "activity")) return;
+    type = item.type;
+  } else {
+    return;
+  }
+
+  tripItemForm.reset();
+  if (!configureTripItemForm(type)) return;
+  setTripFormValue("dayId", day.id);
+  setTripFormValue("itemId", item?.id || "");
+  const isEditing = Boolean(item) || (type === "lodging" && day.lodging);
+  if (tripItemDialogTitle) {
+    tripItemDialogTitle.textContent = `${isEditing ? "\u7f16\u8f91" : "\u6dfb\u52a0"}${type === "transport" ? "\u4ea4\u901a" : type === "activity" ? "\u6d3b\u52a8" : "\u4f4f\u5bbf"}`;
+  }
+
+  if (type === "transport") {
+    populateTripPlaceSelect(tripFormControl("fromPlaceId"), placeIds, item?.fromPlaceId || placeIds[0]);
+    populateTripPlaceSelect(tripFormControl("toPlaceId"), placeIds, item?.toPlaceId || placeIds.at(-1));
+    setTripFormValue("serviceNo", item?.serviceNo);
+    setTripFormValue("startTime", item?.startTime);
+    setTripFormValue("endTime", item?.endTime);
+    setTripFormValue("endDayOffset", item?.endDayOffset);
+    setTripFormValue("note", item?.note);
+  } else if (type === "activity") {
+    const selectedPlaceId = populateTripPlaceSelect(
+      tripFormControl("placeId"),
+      placeIds,
+      item?.placeId || day.overnightPlaceId || placeIds[0]
+    );
+    renderTripLandmarkOptions(selectedPlaceId);
+    setTripFormValue("title", item?.title);
+    setTripFormValue("startTime", item?.startTime);
+    setTripFormValue("endTime", item?.endTime);
+    setTripFormValue("address", item?.address);
+    setTripFormValue("note", item?.note);
+  } else {
+    const lodging = day.lodging || {};
+    populateTripPlaceSelect(
+      tripFormControl("placeId"),
+      placeIds,
+      lodging.placeId || day.overnightPlaceId || placeIds[0]
+    );
+    setTripFormValue("title", lodging.name);
+    setTripFormValue("startTime", lodging.checkInTime);
+    setTripFormValue("endTime", lodging.checkOutTime);
+    setTripFormValue("address", lodging.address);
+    setTripFormValue("note", lodging.note);
+  }
+
+  if (!tripItemDialog.open) {
+    if (typeof tripItemDialog.showModal === "function") tripItemDialog.showModal();
+    else tripItemDialog.setAttribute("open", "");
+  }
+  const focusControl = type === "transport" ? tripFormControl("serviceNo") : tripFormControl("title");
+  window.requestAnimationFrame(() => focusControl?.focus());
+}
+
+function submitTripItemForm(event) {
+  event.preventDefault();
+  if (!tripItemForm || !state.tripPlan) return;
+  const values = Object.fromEntries(new FormData(tripItemForm).entries());
+  try {
+    const command = commandForTripItemForm(values, {
+      landmarkNames: values.type === "activity" ? landmarkNamesForPlace(values.placeId) : []
+    });
+    closeTripItemDialog("saved");
+    handleTripCommand(command, { action: "day", dayId: command.dayId });
+  } catch {
+    updateArchiveStatus("\u8bf7\u8865\u5168\u5f53\u524d\u7f16\u8f91\u9879\u76ee\u7684\u5fc5\u586b\u4fe1\u606f\u3002", "error");
+  }
+}
+
+function updateTripNameMetadata() {
+  if (!tripNameInput || !state.tripPlan) return;
+  const currentName = typeof state.tripPlan.name === "string" && state.tripPlan.name.trim()
+    ? state.tripPlan.name.trim().slice(0, 60)
+    : DEFAULT_TRIP_NAME;
+  const requestedName = tripNameInput.value.trim().slice(0, 60);
+  const name = requestedName || currentName;
+  tripNameInput.value = name;
+  handleTripCommand({ type: "update-metadata", patch: { name } });
+}
+
+function updateTripStartDateMetadata() {
+  if (!tripStartDateInput || !state.tripPlan) return;
+  handleTripCommand({
+    type: "update-metadata",
+    patch: { startDate: tripStartDateInput.value || null }
+  });
+}
+
+function undoTripEdit() {
+  const previous = state.tripHistory.pop();
+  if (!previous) return;
+  commitTripPlan(previous, {
+    recordHistory: false,
+    message: "\u5df2\u64a4\u9500\u4e0a\u4e00\u6b21\u884c\u7a0b\u7f16\u8f91\u3002"
+  });
+}
+
+function routeDurationsForAutoSchedule(placeIds) {
+  const durations = {};
+  placeIds.slice(1).forEach((to, index) => {
+    const from = placeIds[index];
+    const indexedRoute = state.routes[index];
+    const route = indexedRoute?.from === from && indexedRoute?.to === to
+      ? indexedRoute
+      : state.routes.find((candidate) => candidate.from === from && candidate.to === to);
+    durations[`${from}>${to}`] = route ? routeDurationForPlanning(route) : 2 * 60 * 60;
+  });
+  return durations;
+}
+
+function autoScheduleCurrentTrip() {
+  const plan = state.tripPlan;
+  if (!plan || !Array.isArray(plan.days) || !plan.days.length) return;
+  if (plan.days.some((day) => day.manuallyEdited)) {
+    const confirmed = window.confirm(
+      "\u81ea\u52a8\u6392\u671f\u4f1a\u91cd\u65b0\u6309\u5f53\u524d\u8282\u594f\u62c6\u5206\u65e5\u671f\uff0c\u5e76\u8986\u76d6\u5df2\u6709\u624b\u52a8\u65e5\u671f\u5b89\u6392\u3002\u662f\u5426\u7ee7\u7eed\uff1f"
+    );
+    if (!confirmed) return;
+  }
+  const placeIds = routePlaceIds(plan);
+  const metadata = {
+    name: typeof plan.name === "string" && plan.name.trim() ? plan.name : DEFAULT_TRIP_NAME,
+    startDate: plan.startDate || null,
+    pace: plan.pace || state.tripPace,
+    transportMode: resolveTripTransportMode(plan)
+  };
+  const nextPlan = autoScheduleTrip({
+    placeIds,
+    durations: routeDurationsForAutoSchedule(placeIds),
+    paceProfile: tripPaceProfile(metadata.pace),
+    metadata
+  });
+  commitTripPlan(nextPlan, {
+    message: "\u5df2\u6309\u5f53\u524d\u884c\u7a0b\u8282\u594f\u91cd\u65b0\u81ea\u52a8\u6392\u671f\u3002"
+  });
+}
+
 function renderPanel() {
   const selected = placeById(state.selectedCityId);
   syncTransportButtons();
@@ -1220,10 +1689,7 @@ function renderPanel() {
   emptyState.hidden = state.routes.length > 0;
   undoBtn.disabled = state.routes.length === 0;
   clearBtn.disabled = state.routes.length === 0 && !state.selectedCityId;
-  const hasPlan = state.routes.length > 0 || Boolean(state.selectedCityId);
-  if (saveTripBtn) saveTripBtn.disabled = !hasPlan;
-  if (shareTripBtn) shareTripBtn.disabled = !hasPlan;
-  exportBtn.disabled = state.routes.length === 0;
+  syncTripArchiveControls();
   cityCount.textContent = String(state.cities.length);
   if (state.viewMode === "city") {
     const activeCity = cityById(state.activeCityViewId);
@@ -1238,8 +1704,57 @@ function renderPanel() {
   updateCityStyles();
   updateTotals();
   chainLabel.textContent = buildChainLabel();
-  renderItineraryPanel();
+  renderTripPlanner();
   renderFoodPanel();
+}
+
+function renderTripPlanner() {
+  if (!tripEditorRoot || !itineraryMeta || !itineraryEmptyState || !tripHealth) return;
+  if (typeof state.tripEditorDestroy === "function") state.tripEditorDestroy();
+  state.tripEditorDestroy = null;
+  tripEditorRoot.replaceChildren();
+
+  const plan = state.tripPlan;
+  const hasCalendar = Array.isArray(plan?.days) && plan.days.length > 0;
+  if (tripNameInput && document.activeElement !== tripNameInput) tripNameInput.value = plan?.name || "";
+  if (tripStartDateInput && document.activeElement !== tripStartDateInput) tripStartDateInput.value = plan?.startDate || "";
+  if (autoScheduleBtn) autoScheduleBtn.disabled = !hasCalendar;
+  if (undoTripEditBtn) undoTripEditBtn.disabled = state.tripHistory.length === 0;
+  itineraryEmptyState.hidden = hasCalendar;
+
+  if (!hasCalendar) {
+    itineraryMeta.textContent = "\u5f85\u751f\u6210";
+    tripHealth.hidden = true;
+    tripHealth.className = "trip-health";
+    tripHealth.textContent = "";
+    return;
+  }
+
+  const pace = tripPaceProfile(plan.pace);
+  const planPlaceIds = routePlaceIds(plan);
+  const warnings = validateTripPlan(plan, { paceProfile: pace });
+  itineraryMeta.textContent = `${plan.days.length} \u5929 \u00b7 ${pace.label} \u00b7 ${planPlaceIds.length} \u4e2a\u5730\u70b9`;
+  const errorCount = state.routes.filter((route) => route.status === "error").length;
+  const loadingCount = state.routes.filter((route) => route.status === "loading").length;
+  const healthMessages = [];
+  if (warnings.length) healthMessages.push(`\u53d1\u73b0 ${warnings.length} \u9879\u884c\u7a0b\u63d0\u9192`);
+  if (errorCount) healthMessages.push(`${errorCount} \u6bb5\u8def\u7ebf\u6682\u65f6\u65e0\u6cd5\u4f30\u7b97`);
+  else if (loadingCount) healthMessages.push(`\u6b63\u5728\u4f30\u7b97 ${loadingCount} \u6bb5\u8def\u7ebf`);
+  if (!healthMessages.length) healthMessages.push(`${plan.days.length} \u5929\u884c\u7a0b\u5df2\u4e0e\u5730\u56fe\u8def\u7ebf\u540c\u6b65`);
+  tripHealth.hidden = false;
+  tripHealth.className = `trip-health${errorCount || warnings.length ? " warning" : ""}`;
+  tripHealth.textContent = `${healthMessages.join("\uff1b")}\u3002`;
+
+  tripEditorRoot.innerHTML = renderTripEditorMarkup({
+    plan,
+    warnings,
+    placeName: (placeId) => placeById(placeId)?.name || placeId
+  });
+  state.tripEditorDestroy = mountTripEditor({
+    root: tripEditorRoot,
+    onCommand: handleTripCommand,
+    onEditRequest: openTripItemDialog
+  });
 }
 
 function updateTotals() {
@@ -1564,131 +2079,509 @@ function uniqueByName(values) {
   });
 }
 
-function serializedTripState() {
-  return {
-    transportMode: state.transportMode,
-    tripPace: state.tripPace,
-    selectedCityId: state.selectedCityId,
-    routes: state.routes.map((route) => ({
-      from: route.from,
-      to: route.to,
-      transportMode: route.transportMode || state.transportMode
-    })),
-    savedAt: new Date().toISOString()
-  };
+function hasSerializableTrip() {
+  return Boolean(state.tripPlan);
 }
 
-function hasSerializableTrip() {
-  return Boolean(state.selectedCityId || state.routes.length);
+function syncTripArchiveControls() {
+  const hasPlan = hasSerializableTrip();
+  const hasCalendar = Array.isArray(state.tripPlan?.days) && state.tripPlan.days.length > 0;
+  if (saveTripBtn) saveTripBtn.disabled = !hasPlan;
+  if (shareTripBtn) shareTripBtn.disabled = !hasPlan;
+  if (exportMarkdownBtn) exportMarkdownBtn.disabled = !hasCalendar;
+  if (exportHtmlBtn) exportHtmlBtn.disabled = !hasCalendar;
+  if (exportTripFileBtn) {
+    exportTripFileBtn.disabled = !canExportTripFile({
+      plan: state.tripPlan,
+      emergencyLegacyRaw: emergencyLegacyTripRaw
+    });
+  }
+}
+
+function rememberEmergencyLegacyTrip(raw) {
+  if (!canExportTripFile({ emergencyLegacyRaw: raw })) return false;
+  emergencyLegacyTripRaw = raw;
+  syncTripArchiveControls();
+  return true;
+}
+
+function clearEmergencyLegacyTrip() {
+  emergencyLegacyTripRaw = null;
+  syncTripArchiveControls();
+}
+
+function archiveFailureGuidance() {
+  if (canExportTripFile({
+    plan: state.tripPlan,
+    emergencyLegacyRaw: emergencyLegacyTripRaw
+  })) {
+    return "请点击页面上的“导出行程”保存文件后重试。";
+  }
+  return "请保持页面打开，并在浏览器设置中检查本站点数据权限后重试。";
+}
+
+function replaceBrowserUrl(nextUrl) {
+  window.history.replaceState(null, "", nextUrl);
 }
 
 function persistTripState(message = "\u5df2\u81ea\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002") {
   if (!hasSerializableTrip()) {
-    clearPersistedTripState();
-    return;
+    return clearPersistedTripState();
   }
-  try {
-    window.localStorage.setItem(TRIP_STORAGE_KEY, JSON.stringify(serializedTripState()));
-    updateArchiveStatus(message, "success");
-  } catch (error) {
-    updateArchiveStatus("\u672c\u673a\u5b58\u50a8\u4e0d\u53ef\u7528\uff0c\u8bf7\u4f7f\u7528\u590d\u5236\u94fe\u63a5\u3002", "error");
-  }
-}
-
-function clearPersistedTripState() {
-  try {
-    window.localStorage.removeItem(TRIP_STORAGE_KEY);
-  } catch (error) {
-    // Local storage can be disabled; clearing is best-effort.
-  }
-  clearTripHash();
-  updateArchiveStatus("\u8def\u7ebf\u5df2\u6e05\u7a7a\uff0c\u672c\u673a\u5b58\u6863\u5df2\u79fb\u9664\u3002", "success");
-}
-
-function tripStateFromHash() {
-  const params = new URLSearchParams(window.location.hash.replace(/^#/, ""));
-  const encoded = params.get("trip");
-  if (!encoded) return null;
-  try {
-    return JSON.parse(decodeURIComponent(encoded));
-  } catch (error) {
-    updateArchiveStatus("\u94fe\u63a5\u91cc\u7684\u884c\u7a0b\u65e0\u6cd5\u8bfb\u53d6\u3002", "error");
-    return null;
-  }
-}
-
-function tripStateFromStorage() {
-  try {
-    const saved = window.localStorage.getItem(TRIP_STORAGE_KEY);
-    return saved ? JSON.parse(saved) : null;
-  } catch (error) {
-    return null;
-  }
-}
-
-function restoreTripState() {
-  const data = tripStateFromHash() || tripStateFromStorage();
-  if (!data) {
-    updateArchiveStatus("\u8def\u7ebf\u4f1a\u81ea\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002");
+  lastTripPersistenceResult = writeTripPlanV2({
+    storage: tripArchiveStorage,
+    plan: state.tripPlan,
+    currentUrl: window.location.href,
+    replaceUrl: replaceBrowserUrl
+  });
+  if (!lastTripPersistenceResult.stored) {
+    updateArchiveStatus("本机存储失败，当前行程仍保留在本页；请立即点击页面上的“导出行程”保存文件备份。", "error");
     return false;
   }
-
-  const restoredRoutes = Array.isArray(data.routes)
-    ? data.routes
-      .filter((route) => route && placeById(route.from) && placeById(route.to))
-      .map((route, index) => ({
-        id: index + 1,
-        from: route.from,
-        to: route.to,
-        status: "loading",
-        distance: null,
-        duration: null,
-        fallback: false,
-        error: null,
-        transportMode: transportProfiles[route.transportMode] ? route.transportMode : (data.transportMode || state.transportMode),
-        transportLabel: transportProfile(route.transportMode || data.transportMode || state.transportMode).label
-      }))
-    : [];
-
-  const selected = data.selectedCityId && placeById(data.selectedCityId)
-    ? data.selectedCityId
-    : restoredRoutes[restoredRoutes.length - 1]?.to || null;
-  if (!selected && !restoredRoutes.length) return false;
-
-  state.transportMode = transportProfiles[data.transportMode] ? data.transportMode : state.transportMode;
-  state.tripPace = tripPaceProfiles[data.tripPace] ? data.tripPace : state.tripPace;
-  state.routes = restoredRoutes;
-  state.selectedCityId = selected;
-  state.nextRouteId = restoredRoutes.length + 1;
-  recalculateRoutesForTransport();
-  syncTransportButtons();
-  syncPaceButtons();
-  updateArchiveStatus(tripStateFromHash() ? "\u5df2\u4ece\u5206\u4eab\u94fe\u63a5\u6062\u590d\u884c\u7a0b\u3002" : "\u5df2\u4ece\u672c\u673a\u5b58\u6863\u6062\u590d\u884c\u7a0b\u3002", "success");
+  if (!lastTripPersistenceResult.hashCleared) {
+    const savedMessage = String(message || "行程已保存").replace(/[。；\s]+$/g, "");
+    updateArchiveStatus(`${savedMessage}；但地址栏中的旧分享快照未能清理，请导出行程文件并避免刷新后使用旧快照。`, "error");
+    return true;
+  }
+  updateArchiveStatus(message, "success");
   return true;
 }
 
-function shareUrlForTrip() {
-  const url = new URL(window.location.href);
-  url.hash = `trip=${encodeURIComponent(JSON.stringify(serializedTripState()))}`;
-  return url.toString();
+function finalizeLegacyTripBackup(message) {
+  if (!legacyTripBackupPending) return true;
+  const savedMessage = String(message || "行程已保存").replace(/[。；\s]+$/g, "");
+  const result = finalizeLegacyMigration({ storage: tripArchiveStorage });
+  legacyTripBackupPending = !result.ok;
+  if (!result.ok) {
+    const hashWarning = lastTripPersistenceResult.hashCleared ? "" : "，且地址栏旧分享快照未能清理";
+    updateArchiveStatus(`${savedMessage}；但旧版 v1 存档或迁移备份未完全清理${hashWarning}。`, "error");
+    return false;
+  }
+  if (!lastTripPersistenceResult.hashCleared) {
+    updateArchiveStatus(`${savedMessage}；旧版 v1 存档与迁移备份已清理，但地址栏旧分享快照未能清理。`, "error");
+    return true;
+  }
+  updateArchiveStatus(`${savedMessage}；旧版 v1 存档与迁移备份已清理。`, "success");
+  return true;
+}
+
+function clearPersistedTripState() {
+  clearEmergencyLegacyTrip();
+  const result = clearTripArchive({
+    storage: tripArchiveStorage,
+    currentUrl: window.location.href,
+    replaceUrl: replaceBrowserUrl
+  });
+  legacyTripBackupPending = result.failedKeys.some((key) => (
+    key === LEGACY_TRIP_STORAGE_KEY || key === LEGACY_TRIP_BACKUP_KEY
+  ));
+  if (result.ok) {
+    updateArchiveStatus("行程已清空，v2、旧版与迁移备份均已移除。", "success");
+    return true;
+  }
+  updateArchiveStatus("行程已清空，但部分本机存档或分享地址未能移除；请检查浏览器站点数据。", "error");
+  return false;
+}
+
+function isTripStateRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function prepareTripMigration(data, { allowLegacy = false } = {}) {
+  if (!isTripStateRecord(data)) throw new TypeError("行程文件格式无效");
+  const hasVersion = Object.hasOwn(data, "version");
+  const isLegacy = !hasVersion || data.version === 1;
+  if (isLegacy && !allowLegacy) throw new TypeError("分享链接不是 v2 行程");
+
+  if (!isLegacy) {
+    if (data.version !== TRIP_PLAN_VERSION) throw new TypeError("不支持的行程版本");
+    return {
+      data,
+      isLegacy: false,
+      paceProfile: tripPaceProfile()
+    };
+  }
+
+  if (!isLegacyTripPayload(data)) throw new TypeError("旧版行程格式无效");
+  const routes = (Array.isArray(data.routes) ? data.routes : [])
+    .filter((route) => {
+      if (!isTripStateRecord(route)) return false;
+      const from = tripIdentifier(route.from);
+      const to = tripIdentifier(route.to);
+      return Boolean(from && to && placeById(from) && placeById(to));
+    })
+    .map((route) => ({
+      ...route,
+      from: tripIdentifier(route.from),
+      to: tripIdentifier(route.to)
+    }));
+  const selectedCityId = tripIdentifier(data.selectedCityId);
+  const pace = tripPaceProfiles[data.tripPace] ? data.tripPace : state.tripPace;
+  return {
+    data: {
+      ...data,
+      routes,
+      selectedCityId: selectedCityId && placeById(selectedCityId) ? selectedCityId : null
+    },
+    isLegacy: true,
+    paceProfile: tripPaceProfile(pace)
+  };
+}
+
+function assertTripPlanCanRender(plan, { isLegacy = false } = {}) {
+  const placeIds = routePlaceIds(plan);
+  if (placeIds.some((placeId) => !placeById(placeId))) {
+    throw new TypeError("行程包含当前地图无法识别的地点");
+  }
+  if (isLegacy && !placeIds.length) {
+    throw new TypeError("旧版行程没有可恢复的地点");
+  }
+  return plan;
+}
+
+function captureTripImportSnapshot() {
+  return {
+    tripPlan: state.tripPlan,
+    tripHistory: state.tripHistory.slice(),
+    transportMode: state.transportMode,
+    tripPace: state.tripPace,
+    routes: state.routes,
+    selectedCityId: state.selectedCityId,
+    nextRouteId: state.nextRouteId,
+    archiveSnapshot: captureTripArchiveSnapshot({ storage: tripArchiveStorage }),
+    legacyTripBackupPending,
+    lastTripPersistenceResult,
+    emergencyLegacyTripRaw
+  };
+}
+
+function rollbackTripImportSnapshot(snapshot, {
+  restorePlan = false,
+  restoreV2 = false,
+  restoreBackup = false
+} = {}) {
+  let restored = true;
+  legacyTripBackupPending = snapshot.legacyTripBackupPending;
+  lastTripPersistenceResult = snapshot.lastTripPersistenceResult;
+  emergencyLegacyTripRaw = snapshot.emergencyLegacyTripRaw;
+  const keys = [
+    ...(restoreV2 ? [TRIP_STORAGE_KEY] : []),
+    ...(restoreBackup ? [LEGACY_TRIP_BACKUP_KEY] : [])
+  ];
+  if (keys.length) {
+    const storageResult = restoreTripArchiveSnapshot({
+      storage: tripArchiveStorage,
+      snapshot: snapshot.archiveSnapshot,
+      keys
+    });
+    restored = storageResult.ok && restored;
+  }
+  if (restorePlan) {
+    state.tripPlan = snapshot.tripPlan;
+    state.tripHistory = snapshot.tripHistory.slice();
+    state.transportMode = snapshot.transportMode;
+    state.tripPace = snapshot.tripPace;
+    state.routes = snapshot.routes;
+    state.selectedCityId = snapshot.selectedCityId;
+    state.nextRouteId = snapshot.nextRouteId;
+    try {
+      syncTransportButtons();
+      syncPaceButtons();
+      renderRoutes();
+      renderPanel();
+    } catch (error) {
+      restored = false;
+    }
+  }
+  syncTripArchiveControls();
+  return restored;
+}
+
+function restoredTripMessage(source, failures) {
+  const fallback = failures.size ? `${[...failures].join("、")}不可用；` : "";
+  if (source === "hash") return `${fallback}已从分享链接恢复 v2 行程并保存到本机。`;
+  if (source === "legacy") {
+    return `${fallback}已迁移旧版行程并保存为 v2；原始备份会在第一次有效编辑保存后清理。`;
+  }
+  return `${fallback}已从本机 v2 存档恢复行程。`;
+}
+
+function restoreTripState() {
+  const failures = new Set();
+  try {
+    legacyTripBackupPending = legacyMigrationPending({ storage: tripArchiveStorage });
+  } catch (error) {
+    legacyTripBackupPending = false;
+    failures.add("旧版迁移状态读取失败");
+  }
+  const candidates = readTripRecoveryCandidates({
+    storage: tripArchiveStorage,
+    currentUrl: window.location.href
+  });
+
+  for (const candidate of candidates) {
+    if (candidate.error) {
+      failures.add(`${candidate.label}读取失败`);
+      continue;
+    }
+
+    const previousPending = legacyTripBackupPending;
+    let legacyArchiveSnapshot = null;
+    let backupTouched = false;
+    let commitAttempted = false;
+    try {
+      const data = JSON.parse(candidate.raw);
+      const prepared = prepareTripMigration(data, { allowLegacy: candidate.allowLegacy });
+      if (candidate.requireLegacy && !prepared.isLegacy) {
+        throw new TypeError("旧版存档键中不是 v1 行程");
+      }
+      if (prepared.isLegacy) {
+        try {
+          legacyArchiveSnapshot = captureTripArchiveSnapshot({
+            storage: tripArchiveStorage,
+            keys: [LEGACY_TRIP_BACKUP_KEY]
+          });
+        } catch (error) {
+          failures.add("旧版存档备份状态读取失败，未执行迁移");
+          rememberEmergencyLegacyTrip(candidate.raw);
+          continue;
+        }
+        const backupResult = backupLegacyTripRaw({
+          storage: tripArchiveStorage,
+          raw: candidate.raw
+        });
+        if (!backupResult.ok) {
+          failures.add("旧版存档备份失败，未执行迁移");
+          rememberEmergencyLegacyTrip(candidate.raw);
+          continue;
+        }
+        backupTouched = true;
+        legacyTripBackupPending = true;
+      }
+      const migrated = migrateTripState(prepared.data, { paceProfile: prepared.paceProfile });
+      const plan = normalizeTripPlan(migrated);
+      assertTripPlanCanRender(plan, { isLegacy: prepared.isLegacy });
+
+      commitAttempted = true;
+      const committed = commitTripPlan(plan, {
+        recordHistory: false,
+        completeLegacyMigration: false,
+        message: restoredTripMessage(candidate.source, failures)
+      });
+      clearEmergencyLegacyTrip();
+      if (!committed) return true;
+      return true;
+    } catch (error) {
+      if (backupTouched && !commitAttempted) {
+        const rollback = restoreTripArchiveSnapshot({
+          storage: tripArchiveStorage,
+          snapshot: legacyArchiveSnapshot,
+          keys: [LEGACY_TRIP_BACKUP_KEY]
+        });
+        if (rollback.ok) {
+          legacyTripBackupPending = previousPending;
+        } else {
+          legacyTripBackupPending = true;
+          rememberEmergencyLegacyTrip(candidate.raw);
+          failures.add("旧版存档备份回滚失败");
+        }
+      }
+      failures.add(`${candidate.label}格式无效`);
+    }
+  }
+
+  if (failures.size) {
+    const backupFailure = [...failures].some((failure) => failure.includes("备份"));
+    const storageFailure = [...failures].some((failure) => failure.includes("读取失败"));
+    const guidance = canExportTripFile({ emergencyLegacyRaw: emergencyLegacyTripRaw })
+      ? "请点击页面上的“导出行程”保存原始 v1 文件后重试。"
+      : storageFailure
+        ? "请保持页面打开，并在浏览器设置中检查本站点数据权限后重试。"
+        : "";
+    updateArchiveStatus(
+      `${[...failures].join("、")}。当前行程未更改。${backupFailure || storageFailure ? guidance : ""}`,
+      "error"
+    );
+  } else {
+    updateArchiveStatus("行程会自动保存到本机。");
+  }
+  return false;
+}
+
+function downloadTripFile(plan) {
+  const filename = tripFileName(plan, new Date());
+  downloadTextFile(tripFileText(plan), filename, "application/json;charset=utf-8");
+  return filename;
+}
+
+function exportTripFile() {
+  const exportPayload = tripFileExportPayload({
+    plan: state.tripPlan,
+    emergencyLegacyRaw: emergencyLegacyTripRaw,
+    timestamp: new Date()
+  });
+  if (!exportPayload) {
+    updateArchiveStatus("当前没有可导出的行程。", "error");
+    syncTripArchiveControls();
+    return;
+  }
+  try {
+    downloadTextFile(exportPayload.text, exportPayload.filename, "application/json;charset=utf-8");
+    if (exportPayload.kind === "legacy-emergency") {
+      clearEmergencyLegacyTrip();
+      updateArchiveStatus(`已导出旧版应急行程文件 ${exportPayload.filename}；可用“导入行程”重新导入。`, "success");
+    } else {
+      updateArchiveStatus(`已导出行程文件 ${exportPayload.filename}。`, "success");
+    }
+  } catch (error) {
+    updateArchiveStatus("行程文件导出失败，当前行程仍保留在本页，请重试。", "error");
+  }
 }
 
 async function copyShareLink() {
   if (!hasSerializableTrip()) return;
-  persistTripState("\u5df2\u4fdd\u5b58\uff0c\u6b63\u5728\u51c6\u5907\u5206\u4eab\u94fe\u63a5\u3002");
-  const shareUrl = shareUrlForTrip();
+  const persisted = persistTripState("已保存，正在准备分享。");
+  const hashCleared = persisted && lastTripPersistenceResult.hashCleared;
+  const shareUrl = shareUrlForTrip(state.tripPlan, window.location.href);
+  if (shouldUseTripFile(shareUrl)) {
+    try {
+      const filename = downloadTripFile(state.tripPlan);
+      if (!persisted) {
+        updateArchiveStatus(`本机存储失败，但当前行程仍保留并已导出 ${filename}。`, "error");
+      } else if (!hashCleared) {
+        updateArchiveStatus(`分享内容较大，已导出 ${filename}；但地址栏旧分享快照未能清理。`, "error");
+      } else {
+        updateArchiveStatus(`分享内容较大，已导出 ${filename}，请发送该行程文件。`, "success");
+      }
+    } catch (error) {
+      updateArchiveStatus("行程文件导出失败，当前行程仍保留在本页，请重试。", "error");
+    }
+    return;
+  }
+
+  let copied = false;
   try {
     await navigator.clipboard.writeText(shareUrl);
-    updateArchiveStatus("\u5206\u4eab\u94fe\u63a5\u5df2\u590d\u5236\uff0c\u540c\u884c\u8005\u6253\u5f00\u540e\u53ef\u6062\u590d\u8def\u7ebf\u3002", "success");
+    copied = true;
   } catch (error) {
-    updateArchiveStatus("\u526a\u8d34\u677f\u4e0d\u53ef\u7528\uff0c\u5df2\u5c06\u94fe\u63a5\u653e\u5230\u5730\u5740\u680f\u3002", "error");
+    copied = false;
   }
-  window.history.replaceState(null, "", shareUrl);
+
+  if (copied) {
+    if (!persisted) {
+      updateArchiveStatus("分享链接已复制，但本机存储失败；请另行导出行程文件备份。", "error");
+    } else if (!hashCleared) {
+      updateArchiveStatus("分享链接已复制且 v2 已保存，但地址栏旧分享快照未能清理。", "error");
+    } else {
+      updateArchiveStatus("分享链接已复制，同行者打开后可恢复完整行程。", "success");
+    }
+    return;
+  }
+
+  let addressUpdated = false;
+  try {
+    replaceBrowserUrl(shareUrl);
+    addressUpdated = true;
+  } catch (error) {
+    addressUpdated = false;
+  }
+
+  if (addressUpdated) {
+    if (!persisted) {
+      updateArchiveStatus("本机存储和剪贴板均不可用，短链接已放到地址栏；请导出行程文件备份。", "error");
+    } else {
+      updateArchiveStatus("剪贴板不可用，已将短链接放到地址栏。", "success");
+    }
+  } else {
+    updateArchiveStatus("分享链接复制失败，当前行程未受影响；请导出行程文件备份。", "error");
+  }
 }
 
-function clearTripHash() {
-  if (!window.location.hash.includes("trip=")) return;
-  window.history.replaceState(null, "", `${window.location.pathname}${window.location.search}`);
+async function importTripFile(event) {
+  const input = event.currentTarget;
+  const file = input?.files?.[0];
+  let snapshot = null;
+  let backupTouched = false;
+  let commitAttempted = false;
+  let failureReason = "invalid";
+  let rawText = null;
+  try {
+    if (!file) return;
+    rawText = await file.text();
+    const data = JSON.parse(rawText);
+    const prepared = prepareTripMigration(data, { allowLegacy: true });
+    if (prepared.isLegacy) {
+      try {
+        snapshot = captureTripImportSnapshot();
+      } catch (error) {
+        failureReason = "backup";
+        rememberEmergencyLegacyTrip(rawText);
+        throw error;
+      }
+      const backupResult = backupLegacyTripRaw({
+        storage: tripArchiveStorage,
+        raw: rawText
+      });
+      if (!backupResult.ok) {
+        failureReason = "backup";
+        rememberEmergencyLegacyTrip(rawText);
+        throw new Error("legacy trip backup failed");
+      }
+      backupTouched = true;
+      legacyTripBackupPending = true;
+    }
+
+    const migrated = migrateTripState(prepared.data, { paceProfile: prepared.paceProfile });
+    const plan = normalizeTripPlan(migrated);
+    assertTripPlanCanRender(plan, { isLegacy: prepared.isLegacy });
+    if (!snapshot) {
+      try {
+        snapshot = captureTripImportSnapshot();
+      } catch (error) {
+        failureReason = "storage";
+        throw error;
+      }
+    }
+
+    commitAttempted = true;
+    failureReason = "commit";
+    const committed = commitTripPlan(plan, {
+      completeLegacyMigration: false,
+      message: prepared.isLegacy
+        ? "旧版行程文件已迁移并保存为 v2；原始备份会在下一次有效编辑保存后清理。"
+        : "v2 行程文件已导入并保存到本机。"
+    });
+    if (!committed) {
+      throw new Error("trip import commit failed");
+    }
+    clearEmergencyLegacyTrip();
+  } catch (error) {
+    let rollbackSucceeded = true;
+    if (snapshot) {
+      legacyTripBackupPending = snapshot.legacyTripBackupPending;
+      if (backupTouched || commitAttempted) {
+        rollbackSucceeded = rollbackTripImportSnapshot(snapshot, {
+          restorePlan: commitAttempted,
+          restoreV2: commitAttempted,
+          restoreBackup: backupTouched
+        });
+      }
+    }
+
+    if (!rollbackSucceeded) {
+      updateArchiveStatus(`行程导入失败，且无法完全恢复导入前状态；${archiveFailureGuidance()}`, "error");
+    } else if (failureReason === "backup") {
+      updateArchiveStatus("旧版行程原文备份失败，未执行导入；当前行程、历史和 v2 存档均未更改。请点击页面上的“导出行程”保存刚选择的 v1 文件，并检查本机存储。", "error");
+    } else if (failureReason === "storage") {
+      updateArchiveStatus(`本机存储不可用，无法安全导入；当前行程和历史未更改。${archiveFailureGuidance()}`, "error");
+    } else if (failureReason === "commit") {
+      updateArchiveStatus(`行程文件保存失败，已恢复导入前的行程、历史和存档；${archiveFailureGuidance()}`, "error");
+    } else {
+      updateArchiveStatus("行程文件无效或无法读取，当前行程、编辑历史和本机存档均未更改。", "error");
+    }
+  } finally {
+    if (input) input.value = "";
+  }
 }
 
 function updateArchiveStatus(message, tone = "") {
@@ -2845,28 +3738,41 @@ function tripPaceProfile(mode = state.tripPace) {
 
 function setTransportMode(mode) {
   if (!transportProfiles[mode] || state.transportMode === mode) return;
+  if (state.tripPlan) {
+    const result = applyTripCommand(state.tripPlan, {
+      type: "update-metadata",
+      patch: { transportMode: mode }
+    });
+    if (result.changed) {
+      commitTripPlan(result.plan, {
+        message: "\u5df2\u66f4\u65b0\u4ea4\u901a\u65b9\u5f0f\u5e76\u4fdd\u5b58\u3002"
+      });
+    }
+    return;
+  }
   state.transportMode = mode;
   syncTransportButtons();
   recalculateRoutesForTransport();
   renderRoutes();
   renderPanel();
-  if (hasSerializableTrip()) {
-    persistTripState("\u5df2\u66f4\u65b0\u4ea4\u901a\u65b9\u5f0f\u5e76\u4fdd\u5b58\u3002");
-  } else {
-    updateArchiveStatus("\u4ea4\u901a\u65b9\u5f0f\u5df2\u66f4\u65b0\uff0c\u9009\u62e9\u57ce\u5e02\u540e\u4f1a\u81ea\u52a8\u4fdd\u5b58\u3002");
-  }
+  updateArchiveStatus("\u4ea4\u901a\u65b9\u5f0f\u5df2\u66f4\u65b0\uff0c\u9009\u62e9\u57ce\u5e02\u540e\u4f1a\u81ea\u52a8\u4fdd\u5b58\u3002");
 }
 
 function setTripPace(pace) {
   if (!tripPaceProfiles[pace] || state.tripPace === pace) return;
   state.tripPace = pace;
   syncPaceButtons();
-  renderPanel();
-  if (hasSerializableTrip()) {
-    persistTripState("\u5df2\u66f4\u65b0\u884c\u7a0b\u5f3a\u5ea6\u5e76\u4fdd\u5b58\u3002");
-  } else {
-    updateArchiveStatus("\u884c\u7a0b\u5f3a\u5ea6\u5df2\u66f4\u65b0\uff0c\u9009\u62e9\u57ce\u5e02\u540e\u4f1a\u81ea\u52a8\u4fdd\u5b58\u3002");
+  if (state.tripPlan) {
+    const nextPlan = structuredClone(state.tripPlan);
+    nextPlan.pace = pace;
+    nextPlan.savedAt = new Date().toISOString();
+    commitTripPlan(nextPlan, {
+      message: "\u5df2\u66f4\u65b0\u884c\u7a0b\u5f3a\u5ea6\u5e76\u4fdd\u5b58\u3002"
+    });
+    return;
   }
+  renderPanel();
+  updateArchiveStatus("\u884c\u7a0b\u5f3a\u5ea6\u5df2\u66f4\u65b0\uff0c\u9009\u62e9\u57ce\u5e02\u540e\u4f1a\u81ea\u52a8\u4fdd\u5b58\u3002");
 }
 
 function syncTransportButtons() {
@@ -2918,39 +3824,28 @@ function handlePlaceClick(placeId) {
   const place = placeById(placeId);
   if (!place) return;
 
-  if (!state.selectedCityId) {
+  if (!state.tripPlan) {
+    const requestedName = tripNameInput?.value.trim();
+    const plan = createTripPlan({
+      placeIds: [placeId],
+      ...(requestedName ? { name: requestedName } : {}),
+      startDate: tripStartDateInput?.value || null,
+      pace: state.tripPace,
+      transportMode: state.transportMode
+    });
+    commitTripPlan(plan, { recordHistory: false });
+    return;
+  }
+
+  const currentPlaceIds = routePlaceIds(state.tripPlan);
+  if (currentPlaceIds.at(-1) === placeId) {
     state.selectedCityId = placeId;
     renderPanel();
-    persistTripState();
     return;
   }
 
-  if (state.selectedCityId === placeId) {
-    state.selectedCityId = null;
-    renderPanel();
-    persistTripState();
-    return;
-  }
-
-  const route = {
-    id: state.nextRouteId,
-    from: state.selectedCityId,
-    to: placeId,
-    status: "loading",
-    distance: null,
-    duration: null,
-    fallback: false,
-    error: null,
-    transportMode: state.transportMode,
-    transportLabel: transportProfile().label
-  };
-  state.nextRouteId += 1;
-  state.routes.push(route);
-  state.selectedCityId = placeId;
-  renderRoutes();
-  renderPanel();
-  persistTripState();
-  calculateRouteMetrics(route);
+  const result = reconcileRoutePlaces(state.tripPlan, [...currentPlaceIds, placeId]);
+  commitTripPlan(result.plan);
 }
 
 function handleCityClick(cityId) {
@@ -3020,135 +3915,132 @@ function toRadians(degrees) {
 }
 
 function undoRoute() {
-  const removed = state.routes.pop();
-  if (removed) state.selectedCityId = removed.from;
-  renderRoutes();
-  renderPanel();
-  persistTripState("\u5df2\u64a4\u9500\u5e76\u4fdd\u5b58\u3002");
+  if (!state.tripPlan) return;
+  const placeIds = routePlaceIds(state.tripPlan);
+  if (placeIds.length < 2) return;
+  const result = reconcileRoutePlaces(state.tripPlan, placeIds.slice(0, -1));
+  if (result.blockedRemovals.length) {
+    updateArchiveStatus("\u672b\u5c3e\u5730\u70b9\u5305\u542b\u5df2\u7f16\u8f91\u5b89\u6392\uff0c\u6682\u672a\u64a4\u9500\u3002", "error");
+    return;
+  }
+  commitTripPlan(result.plan, { message: "\u5df2\u64a4\u9500\u5e76\u4fdd\u5b58\u3002" });
 }
 
 function clearRoutes() {
-  state.routes = [];
-  state.selectedCityId = null;
-  renderRoutes();
-  renderPanel();
-  clearPersistedTripState();
+  state.tripHistory = [];
+  commitTripPlan(null, { recordHistory: false });
 }
 
-function exportRoutes() {
-  if (!state.routes.length) return;
+function buildCurrentGuideModel() {
+  const plan = state.tripPlan;
+  if (!Array.isArray(plan?.days) || !plan.days.length) {
+    throw new TypeError("\u5f53\u524d\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u65e5\u5386\u884c\u7a0b");
+  }
 
-  const guide = buildGuideData();
-  const markdown = buildTravelGuideMarkdown(guide);
-  downloadTextFile(markdown, `route-studio-guide-${timestampForFile()}.md`, "text/markdown;charset=utf-8");
-}
-
-function buildGuideData() {
-  const totals = routeTotals();
-  const places = routePlaces();
-  const currentTransport = transportProfile();
-  const pace = tripPaceProfile();
-  return {
-    app: "Route Studio",
-    schemaVersion: 3,
-    exportedAt: new Date().toISOString(),
-    title: `${places.map((place) => place.name).join(" \u2192 ")}\u65c5\u884c\u6307\u5357`,
-    places,
-    days: buildItineraryDays(),
-    totals,
-    currentTransport,
-    pace,
-    segments: state.routes.map((route, index) => {
-      const from = placeById(route.from);
-      const to = placeById(route.to);
-      return {
-        index: index + 1,
-        from,
-        to,
-        status: route.status,
-        distanceText: hasMetrics(route) ? formatDistance(route.distance) : labels.pending,
-        durationText: hasMetrics(route) ? formatDuration(route.duration) : labels.pending,
-        transportLabel: route.transportLabel || currentTransport.label,
-        fallback: Boolean(route.fallback),
-        error: route.error || null
-      };
-    })
+  const referencedPlaceIds = new Set();
+  const addPlaceId = (placeId) => {
+    if (typeof placeId === "string" && placeId) referencedPlaceIds.add(placeId);
   };
-}
-
-function buildTravelGuideMarkdown(guide) {
-  const lines = [
-    `# ${guide.title}`,
-    "",
-    `> \u751f\u6210\u65f6\u95f4\uff1a${new Date(guide.exportedAt).toLocaleString("zh-CN")}`,
-    "",
-    "## \u884c\u7a0b\u603b\u89c8",
-    "",
-    `- \u8def\u7ebf\uff1a${guide.places.map((place) => place.name).join(" \u2192 ")}`,
-    `- \u5efa\u8bae\u5929\u6570\uff1a${guide.days.length} \u5929`,
-    `- \u4ea4\u901a\u65b9\u5f0f\uff1a${guide.currentTransport.label}`,
-    `- \u884c\u7a0b\u5f3a\u5ea6\uff1a${guide.pace.label}\uff08\u65e5\u5747\u8de8\u57ce\u4e0a\u9650 ${formatDuration(guide.pace.dailyTravelLimitSeconds)}\uff09`,
-    `- \u8de8\u57ce\u6bb5\u6570\uff1a${guide.segments.length} \u6bb5`,
-    `- \u4f30\u7b97\u603b\u8ddd\u79bb\uff1a${guide.totals.measuredSegmentCount ? formatDistance(guide.totals.distanceMeters) : labels.pending}`,
-    `- \u4f30\u7b97\u8de8\u57ce\u65f6\u957f\uff1a${guide.totals.measuredSegmentCount ? formatDuration(guide.totals.durationSeconds) : labels.pending}`,
-    "",
-    "## \u6bcf\u65e5\u5b89\u6392",
-    ""
-  ];
-
-  guide.days.forEach((day) => {
-    const schedule = dayScheduleBlocks(day);
-    lines.push(`### \u7b2c ${day.index} \u5929\uff1a${day.places.map((place) => place.name).join(" \u2192 ")}`);
-    lines.push("");
-    lines.push(`- \u8fc7\u591c\uff1a${day.overnight ? day.overnight.name : "\u5f85\u5b9a"}`);
-    lines.push(`- \u4e0a\u5348\uff1a${schedule.morning}`);
-    lines.push(`- \u4e0b\u5348\uff1a${schedule.afternoon}`);
-    lines.push(`- \u665a\u4e0a\uff1a${schedule.evening}`);
-    lines.push(`- \u4f4f\u5bbf\uff1a${dayLodgingText(day)}`);
-    if (day.warnings.length) lines.push(`- \u8282\u594f\u63d0\u9192\uff1a${day.warnings.join("\uff1b")}`);
-    lines.push("");
+  plan.days.forEach((day) => {
+    (Array.isArray(day?.cityEntries) ? day.cityEntries : []).forEach((entry) => addPlaceId(entry?.placeId));
+    addPlaceId(day?.overnightPlaceId);
+    (Array.isArray(day?.items) ? day.items : []).forEach((item) => {
+      addPlaceId(item?.placeId);
+      addPlaceId(item?.fromPlaceId);
+      addPlaceId(item?.toPlaceId);
+    });
+    addPlaceId(day?.lodging?.placeId);
   });
 
-  lines.push("## \u8de8\u57ce\u4ea4\u901a");
-  lines.push("");
-  guide.segments.forEach((segment) => {
-    lines.push(`- \u7b2c ${segment.index} \u6bb5\uff1a${segment.from?.name || ""} \u2192 ${segment.to?.name || ""}\uff0c${segment.transportLabel}\uff0c${segment.distanceText}\uff0c${segment.durationText}${segment.fallback ? "\uff08\u4f30\u7b97\uff09" : ""}`);
+  const placeSnapshots = new Map();
+  referencedPlaceIds.forEach((placeId) => {
+    const snapshot = placeSnapshot(placeById(placeId));
+    if (snapshot) placeSnapshots.set(placeId, snapshot);
   });
-  lines.push("");
 
-  lines.push("## \u57ce\u5e02\u4eae\u70b9\u4e0e\u98df\u884c\u8bb0");
-  lines.push("");
-  guide.places.forEach((place) => {
-    const city = cityForPlace(place);
-    const highlights = cityHighlightsForPlace(place).slice(0, 5);
-    const articles = place.placeType === "county" ? articlesForPlace(place.id) : articlesForCity(city?.id);
-    lines.push(`### ${place.name}`);
-    lines.push("");
-    lines.push(`- \u53ef\u4f18\u5148\u770b\uff1a${highlights.length ? highlights.join("\u3001") : "\u8fdb\u5165\u57ce\u5e02\u89c6\u56fe\u7ee7\u7eed\u6311\u9009"}`);
-    if (articles.length) {
-      articles.slice(0, 3).forEach((article) => {
-        const foods = (article.foods || []).slice(0, 5).join("\u3001");
-        const path = articleReaderPath(article);
-        lines.push(`- [${markdownEscape(article.title)}](${path})${foods ? `\uff1a${foods}` : ""}`);
-      });
+  const routeSegments = state.routes.map((route) => {
+    const segment = {
+      fromPlaceId: route.from,
+      toPlaceId: route.to,
+      transportLabel: route.transportLabel || transportProfile(route.transportMode).label,
+      fallback: Boolean(route.fallback),
+      status: route.status === "success"
+        ? "ready"
+        : route.status === "loading"
+          ? "\u8ba1\u7b97\u4e2d"
+          : route.status === "error"
+            ? "\u65e0\u6cd5\u4f30\u7b97"
+            : route.status || labels.pending,
+      error: route.error || null
+    };
+    if (hasMetrics(route)) {
+      segment.distanceMeters = route.distance;
+      segment.durationSeconds = route.duration;
     } else {
-      lines.push("- \u6682\u65e0\u5df2\u5339\u914d\u98df\u884c\u8bb0\u6587\u7ae0\u3002");
+      segment.distanceText = labels.pending;
+      segment.durationText = labels.pending;
     }
-    lines.push("");
+    return segment;
   });
+  const routeSummary = routeTotals();
+  const totals = {
+    distanceText: routeSummary.measuredSegmentCount
+      ? formatDistance(routeSummary.distanceMeters)
+      : labels.pending,
+    durationText: routeSummary.measuredSegmentCount
+      ? formatDuration(routeSummary.durationSeconds)
+      : labels.pending,
+    segmentCount: state.routes.length,
+    dayCount: plan.days.length
+  };
 
-  lines.push("## \u4f7f\u7528\u63d0\u9192");
-  lines.push("");
-  lines.push("- \u672c\u6307\u5357\u7684\u8de8\u57ce\u8ddd\u79bb\u548c\u65f6\u957f\u6765\u81ea\u5730\u56fe\u4f30\u7b97\uff0c\u4e0d\u4ee3\u8868\u5177\u4f53\u8f66\u6b21\u3002");
-  lines.push("- \u51fa\u53d1\u524d\u8bf7\u4ee5\u5b9e\u9645\u8f66\u7968\u3001\u666f\u70b9\u5f00\u653e\u65f6\u95f4\u3001\u9152\u5e97\u4f4d\u7f6e\u4e3a\u51c6\u3002");
-  lines.push(`- \u5f53\u524d\u4f7f\u7528\u201c${guide.pace.label}\u201d\u5f3a\u5ea6\uff1b\u5982\u679c\u67d0\u5929\u8de8\u57ce\u8d85\u8fc7 ${formatDuration(guide.pace.dailyTravelLimitSeconds)}\uff0c\u5efa\u8bae\u538b\u7f29\u666f\u70b9\u6570\u91cf\u6216\u589e\u52a0\u4e00\u5929\u3002`);
-  lines.push("");
-
-  return `${lines.join("\n")}\n`;
+  return buildGuideModel({
+    plan: state.tripPlan,
+    placeSnapshots: placeSnapshots,
+    warnings: validateTripPlan(plan, { paceProfile: tripPaceProfile(plan.pace) }),
+    routeSegments: routeSegments,
+    totals: totals
+  });
 }
 
-function markdownEscape(value) {
-  return String(value || "").replace(/([\\[\]])/g, "\\$1");
+function guideFileName(plan, extension) {
+  return `${safeTripNameForFile(plan?.name)}-${timestampForFile()}.${extension}`;
+}
+
+function exportMarkdownGuide() {
+  if (!Array.isArray(state.tripPlan?.days) || !state.tripPlan.days.length) {
+    updateArchiveStatus("\u5f53\u524d\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u65e5\u5386\u884c\u7a0b\u3002", "error");
+    return;
+  }
+  try {
+    const plan = state.tripPlan;
+    const model = buildCurrentGuideModel();
+    const markdown = buildMarkdownGuide(model);
+    const filename = guideFileName(plan, "md");
+    downloadTextFile(markdown, filename, "text/markdown;charset=utf-8");
+    updateArchiveStatus(`Markdown \u65c5\u884c\u6307\u5357\u5df2\u5bfc\u51fa\uff1a${filename}`, "success");
+  } catch (error) {
+    console.error("Markdown guide export failed", error);
+    updateArchiveStatus("Markdown \u65c5\u884c\u6307\u5357\u5bfc\u51fa\u5931\u8d25\uff0c\u5f53\u524d\u884c\u7a0b\u672a\u66f4\u6539\u3002", "error");
+  }
+}
+
+function exportPrintableHtmlGuide() {
+  if (!Array.isArray(state.tripPlan?.days) || !state.tripPlan.days.length) {
+    updateArchiveStatus("\u5f53\u524d\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u65e5\u5386\u884c\u7a0b\u3002", "error");
+    return;
+  }
+  try {
+    const plan = state.tripPlan;
+    const model = buildCurrentGuideModel();
+    const html = buildPrintableHtml(model);
+    const filename = guideFileName(plan, "html");
+    downloadTextFile(html, filename, "text/html;charset=utf-8");
+    updateArchiveStatus(`\u6253\u5370\u7248 HTML \u65c5\u884c\u6307\u5357\u5df2\u5bfc\u51fa\uff1a${filename}`, "success");
+  } catch (error) {
+    console.error("Printable HTML guide export failed", error);
+    updateArchiveStatus("\u6253\u5370\u7248 HTML \u65c5\u884c\u6307\u5357\u5bfc\u51fa\u5931\u8d25\uff0c\u5f53\u524d\u884c\u7a0b\u672a\u66f4\u6539\u3002", "error");
+  }
 }
 
 function downloadTextFile(text, filename, type) {
@@ -3206,11 +4098,28 @@ clearBtn.addEventListener("click", clearRoutes);
 resetViewBtn.addEventListener("click", resetMapView);
 if (saveTripBtn) saveTripBtn.addEventListener("click", () => persistTripState("\u5df2\u624b\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002"));
 if (shareTripBtn) shareTripBtn.addEventListener("click", copyShareLink);
-exportBtn.addEventListener("click", exportRoutes);
+if (tripImportBtn && tripImportInput) {
+  tripImportBtn.addEventListener("click", () => tripImportInput.click());
+}
+if (tripImportInput) tripImportInput.addEventListener("change", importTripFile);
+if (exportTripFileBtn) exportTripFileBtn.addEventListener("click", exportTripFile);
+if (exportMarkdownBtn) exportMarkdownBtn.addEventListener("click", exportMarkdownGuide);
+if (exportHtmlBtn) exportHtmlBtn.addEventListener("click", exportPrintableHtmlGuide);
 exitCityViewBtn.addEventListener("click", () => exitCityView());
 transportButtons.forEach((button) => button.addEventListener("click", () => setTransportMode(button.dataset.mode)));
 paceButtons.forEach((button) => button.addEventListener("click", () => setTripPace(button.dataset.pace)));
 mobileViewButtons.forEach((button) => button.addEventListener("click", () => setMobileView(button.dataset.mobileView)));
+if (tripNameInput) tripNameInput.addEventListener("change", updateTripNameMetadata);
+if (tripStartDateInput) tripStartDateInput.addEventListener("change", updateTripStartDateMetadata);
+if (autoScheduleBtn) autoScheduleBtn.addEventListener("click", autoScheduleCurrentTrip);
+if (undoTripEditBtn) undoTripEditBtn.addEventListener("click", undoTripEdit);
+if (tripItemForm) tripItemForm.addEventListener("submit", submitTripItemForm);
+if (tripItemCancelBtn) tripItemCancelBtn.addEventListener("click", () => closeTripItemDialog());
+if (tripItemPlaceId) {
+  tripItemPlaceId.addEventListener("change", () => {
+    if (tripFormControl("type")?.value === "activity") renderTripLandmarkOptions(tripItemPlaceId.value);
+  });
+}
 citySearch.addEventListener("input", updateSearchResults);
 citySearch.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || !state.searchResults.length) return;
