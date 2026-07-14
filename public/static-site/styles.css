@@ -113,8 +113,28 @@ h1 {
 
 .controls {
   display: grid;
-  grid-template-columns: repeat(2, 1fr);
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px;
+}
+
+.trip-file-export,
+.guide-export-actions {
+  grid-column: 1 / -1;
+}
+
+.guide-export-actions {
+  min-width: 0;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.guide-export-actions .icon-button {
+  width: 100%;
+  min-width: 0;
+  min-height: 52px;
+  padding: 8px 6px;
+  overflow-wrap: anywhere;
 }
 
 .archive-status {

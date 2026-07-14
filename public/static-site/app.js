@@ -27,12 +27,18 @@ import {
   legacyMigrationPending,
   readTripRecoveryCandidates,
   restoreTripArchiveSnapshot,
+  safeTripNameForFile,
   shareUrlForTrip,
   tripFileExportPayload,
   tripFileName,
   tripFileText,
   writeTripPlanV2
 } from "./trip-archive.js";
+import {
+  buildGuideModel,
+  buildMarkdownGuide,
+  buildPrintableHtml
+} from "./guide-export.js";
 import {
   commandForTripItemForm,
   mountTripEditor,
@@ -529,7 +535,8 @@ const shareTripBtn = document.querySelector("#shareTripBtn");
 const tripImportBtn = document.querySelector("#tripImportBtn");
 const tripImportInput = document.querySelector("#tripImportInput");
 const exportTripFileBtn = document.querySelector("#exportTripFileBtn");
-const exportBtn = document.querySelector("#exportBtn");
+const exportMarkdownBtn = document.querySelector("#exportMarkdownBtn");
+const exportHtmlBtn = document.querySelector("#exportHtmlBtn");
 const citySearch = document.querySelector("#citySearch");
 const clearSearchBtn = document.querySelector("#clearSearchBtn");
 const searchResults = document.querySelector("#searchResults");
@@ -1683,7 +1690,6 @@ function renderPanel() {
   undoBtn.disabled = state.routes.length === 0;
   clearBtn.disabled = state.routes.length === 0 && !state.selectedCityId;
   syncTripArchiveControls();
-  exportBtn.disabled = state.routes.length === 0;
   cityCount.textContent = String(state.cities.length);
   if (state.viewMode === "city") {
     const activeCity = cityById(state.activeCityViewId);
@@ -2079,8 +2085,11 @@ function hasSerializableTrip() {
 
 function syncTripArchiveControls() {
   const hasPlan = hasSerializableTrip();
+  const hasCalendar = Array.isArray(state.tripPlan?.days) && state.tripPlan.days.length > 0;
   if (saveTripBtn) saveTripBtn.disabled = !hasPlan;
   if (shareTripBtn) shareTripBtn.disabled = !hasPlan;
+  if (exportMarkdownBtn) exportMarkdownBtn.disabled = !hasCalendar;
+  if (exportHtmlBtn) exportHtmlBtn.disabled = !hasCalendar;
   if (exportTripFileBtn) {
     exportTripFileBtn.disabled = !canExportTripFile({
       plan: state.tripPlan,
@@ -3922,120 +3931,116 @@ function clearRoutes() {
   commitTripPlan(null, { recordHistory: false });
 }
 
-function exportRoutes() {
-  if (!state.routes.length) return;
+function buildCurrentGuideModel() {
+  const plan = state.tripPlan;
+  if (!Array.isArray(plan?.days) || !plan.days.length) {
+    throw new TypeError("\u5f53\u524d\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u65e5\u5386\u884c\u7a0b");
+  }
 
-  const guide = buildGuideData();
-  const markdown = buildTravelGuideMarkdown(guide);
-  downloadTextFile(markdown, `route-studio-guide-${timestampForFile()}.md`, "text/markdown;charset=utf-8");
-}
-
-function buildGuideData() {
-  const totals = routeTotals();
-  const places = routePlaces();
-  const currentTransport = transportProfile();
-  const pace = tripPaceProfile();
-  return {
-    app: "Route Studio",
-    schemaVersion: 3,
-    exportedAt: new Date().toISOString(),
-    title: `${places.map((place) => place.name).join(" \u2192 ")}\u65c5\u884c\u6307\u5357`,
-    places,
-    days: buildItineraryDays(),
-    totals,
-    currentTransport,
-    pace,
-    segments: state.routes.map((route, index) => {
-      const from = placeById(route.from);
-      const to = placeById(route.to);
-      return {
-        index: index + 1,
-        from,
-        to,
-        status: route.status,
-        distanceText: hasMetrics(route) ? formatDistance(route.distance) : labels.pending,
-        durationText: hasMetrics(route) ? formatDuration(route.duration) : labels.pending,
-        transportLabel: route.transportLabel || currentTransport.label,
-        fallback: Boolean(route.fallback),
-        error: route.error || null
-      };
-    })
+  const referencedPlaceIds = new Set();
+  const addPlaceId = (placeId) => {
+    if (typeof placeId === "string" && placeId) referencedPlaceIds.add(placeId);
   };
-}
-
-function buildTravelGuideMarkdown(guide) {
-  const lines = [
-    `# ${guide.title}`,
-    "",
-    `> \u751f\u6210\u65f6\u95f4\uff1a${new Date(guide.exportedAt).toLocaleString("zh-CN")}`,
-    "",
-    "## \u884c\u7a0b\u603b\u89c8",
-    "",
-    `- \u8def\u7ebf\uff1a${guide.places.map((place) => place.name).join(" \u2192 ")}`,
-    `- \u5efa\u8bae\u5929\u6570\uff1a${guide.days.length} \u5929`,
-    `- \u4ea4\u901a\u65b9\u5f0f\uff1a${guide.currentTransport.label}`,
-    `- \u884c\u7a0b\u5f3a\u5ea6\uff1a${guide.pace.label}\uff08\u65e5\u5747\u8de8\u57ce\u4e0a\u9650 ${formatDuration(guide.pace.dailyTravelLimitSeconds)}\uff09`,
-    `- \u8de8\u57ce\u6bb5\u6570\uff1a${guide.segments.length} \u6bb5`,
-    `- \u4f30\u7b97\u603b\u8ddd\u79bb\uff1a${guide.totals.measuredSegmentCount ? formatDistance(guide.totals.distanceMeters) : labels.pending}`,
-    `- \u4f30\u7b97\u8de8\u57ce\u65f6\u957f\uff1a${guide.totals.measuredSegmentCount ? formatDuration(guide.totals.durationSeconds) : labels.pending}`,
-    "",
-    "## \u6bcf\u65e5\u5b89\u6392",
-    ""
-  ];
-
-  guide.days.forEach((day) => {
-    const schedule = dayScheduleBlocks(day);
-    lines.push(`### \u7b2c ${day.index} \u5929\uff1a${day.places.map((place) => place.name).join(" \u2192 ")}`);
-    lines.push("");
-    lines.push(`- \u8fc7\u591c\uff1a${day.overnight ? day.overnight.name : "\u5f85\u5b9a"}`);
-    lines.push(`- \u4e0a\u5348\uff1a${schedule.morning}`);
-    lines.push(`- \u4e0b\u5348\uff1a${schedule.afternoon}`);
-    lines.push(`- \u665a\u4e0a\uff1a${schedule.evening}`);
-    lines.push(`- \u4f4f\u5bbf\uff1a${dayLodgingText(day)}`);
-    if (day.warnings.length) lines.push(`- \u8282\u594f\u63d0\u9192\uff1a${day.warnings.join("\uff1b")}`);
-    lines.push("");
+  plan.days.forEach((day) => {
+    (Array.isArray(day?.cityEntries) ? day.cityEntries : []).forEach((entry) => addPlaceId(entry?.placeId));
+    addPlaceId(day?.overnightPlaceId);
+    (Array.isArray(day?.items) ? day.items : []).forEach((item) => {
+      addPlaceId(item?.placeId);
+      addPlaceId(item?.fromPlaceId);
+      addPlaceId(item?.toPlaceId);
+    });
+    addPlaceId(day?.lodging?.placeId);
   });
 
-  lines.push("## \u8de8\u57ce\u4ea4\u901a");
-  lines.push("");
-  guide.segments.forEach((segment) => {
-    lines.push(`- \u7b2c ${segment.index} \u6bb5\uff1a${segment.from?.name || ""} \u2192 ${segment.to?.name || ""}\uff0c${segment.transportLabel}\uff0c${segment.distanceText}\uff0c${segment.durationText}${segment.fallback ? "\uff08\u4f30\u7b97\uff09" : ""}`);
+  const placeSnapshots = new Map();
+  referencedPlaceIds.forEach((placeId) => {
+    const snapshot = placeSnapshot(placeById(placeId));
+    if (snapshot) placeSnapshots.set(placeId, snapshot);
   });
-  lines.push("");
 
-  lines.push("## \u57ce\u5e02\u4eae\u70b9\u4e0e\u98df\u884c\u8bb0");
-  lines.push("");
-  guide.places.forEach((place) => {
-    const city = cityForPlace(place);
-    const highlights = cityHighlightsForPlace(place).slice(0, 5);
-    const articles = place.placeType === "county" ? articlesForPlace(place.id) : articlesForCity(city?.id);
-    lines.push(`### ${place.name}`);
-    lines.push("");
-    lines.push(`- \u53ef\u4f18\u5148\u770b\uff1a${highlights.length ? highlights.join("\u3001") : "\u8fdb\u5165\u57ce\u5e02\u89c6\u56fe\u7ee7\u7eed\u6311\u9009"}`);
-    if (articles.length) {
-      articles.slice(0, 3).forEach((article) => {
-        const foods = (article.foods || []).slice(0, 5).join("\u3001");
-        const path = articleReaderPath(article);
-        lines.push(`- [${markdownEscape(article.title)}](${path})${foods ? `\uff1a${foods}` : ""}`);
-      });
+  const routeSegments = state.routes.map((route) => {
+    const segment = {
+      fromPlaceId: route.from,
+      toPlaceId: route.to,
+      transportLabel: route.transportLabel || transportProfile(route.transportMode).label,
+      fallback: Boolean(route.fallback),
+      status: route.status === "success"
+        ? "ready"
+        : route.status === "loading"
+          ? "\u8ba1\u7b97\u4e2d"
+          : route.status === "error"
+            ? "\u65e0\u6cd5\u4f30\u7b97"
+            : route.status || labels.pending,
+      error: route.error || null
+    };
+    if (hasMetrics(route)) {
+      segment.distanceMeters = route.distance;
+      segment.durationSeconds = route.duration;
     } else {
-      lines.push("- \u6682\u65e0\u5df2\u5339\u914d\u98df\u884c\u8bb0\u6587\u7ae0\u3002");
+      segment.distanceText = labels.pending;
+      segment.durationText = labels.pending;
     }
-    lines.push("");
+    return segment;
   });
+  const routeSummary = routeTotals();
+  const totals = {
+    distanceText: routeSummary.measuredSegmentCount
+      ? formatDistance(routeSummary.distanceMeters)
+      : labels.pending,
+    durationText: routeSummary.measuredSegmentCount
+      ? formatDuration(routeSummary.durationSeconds)
+      : labels.pending,
+    segmentCount: state.routes.length,
+    dayCount: plan.days.length
+  };
 
-  lines.push("## \u4f7f\u7528\u63d0\u9192");
-  lines.push("");
-  lines.push("- \u672c\u6307\u5357\u7684\u8de8\u57ce\u8ddd\u79bb\u548c\u65f6\u957f\u6765\u81ea\u5730\u56fe\u4f30\u7b97\uff0c\u4e0d\u4ee3\u8868\u5177\u4f53\u8f66\u6b21\u3002");
-  lines.push("- \u51fa\u53d1\u524d\u8bf7\u4ee5\u5b9e\u9645\u8f66\u7968\u3001\u666f\u70b9\u5f00\u653e\u65f6\u95f4\u3001\u9152\u5e97\u4f4d\u7f6e\u4e3a\u51c6\u3002");
-  lines.push(`- \u5f53\u524d\u4f7f\u7528\u201c${guide.pace.label}\u201d\u5f3a\u5ea6\uff1b\u5982\u679c\u67d0\u5929\u8de8\u57ce\u8d85\u8fc7 ${formatDuration(guide.pace.dailyTravelLimitSeconds)}\uff0c\u5efa\u8bae\u538b\u7f29\u666f\u70b9\u6570\u91cf\u6216\u589e\u52a0\u4e00\u5929\u3002`);
-  lines.push("");
-
-  return `${lines.join("\n")}\n`;
+  return buildGuideModel({
+    plan: state.tripPlan,
+    placeSnapshots: placeSnapshots,
+    warnings: validateTripPlan(plan, { paceProfile: tripPaceProfile(plan.pace) }),
+    routeSegments: routeSegments,
+    totals: totals
+  });
 }
 
-function markdownEscape(value) {
-  return String(value || "").replace(/([\\[\]])/g, "\\$1");
+function guideFileName(plan, extension) {
+  return `${safeTripNameForFile(plan?.name)}-${timestampForFile()}.${extension}`;
+}
+
+function exportMarkdownGuide() {
+  if (!Array.isArray(state.tripPlan?.days) || !state.tripPlan.days.length) {
+    updateArchiveStatus("\u5f53\u524d\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u65e5\u5386\u884c\u7a0b\u3002", "error");
+    return;
+  }
+  try {
+    const plan = state.tripPlan;
+    const model = buildCurrentGuideModel();
+    const markdown = buildMarkdownGuide(model);
+    const filename = guideFileName(plan, "md");
+    downloadTextFile(markdown, filename, "text/markdown;charset=utf-8");
+    updateArchiveStatus(`Markdown \u65c5\u884c\u6307\u5357\u5df2\u5bfc\u51fa\uff1a${filename}`, "success");
+  } catch (error) {
+    console.error("Markdown guide export failed", error);
+    updateArchiveStatus("Markdown \u65c5\u884c\u6307\u5357\u5bfc\u51fa\u5931\u8d25\uff0c\u5f53\u524d\u884c\u7a0b\u672a\u66f4\u6539\u3002", "error");
+  }
+}
+
+function exportPrintableHtmlGuide() {
+  if (!Array.isArray(state.tripPlan?.days) || !state.tripPlan.days.length) {
+    updateArchiveStatus("\u5f53\u524d\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u65e5\u5386\u884c\u7a0b\u3002", "error");
+    return;
+  }
+  try {
+    const plan = state.tripPlan;
+    const model = buildCurrentGuideModel();
+    const html = buildPrintableHtml(model);
+    const filename = guideFileName(plan, "html");
+    downloadTextFile(html, filename, "text/html;charset=utf-8");
+    updateArchiveStatus(`\u6253\u5370\u7248 HTML \u65c5\u884c\u6307\u5357\u5df2\u5bfc\u51fa\uff1a${filename}`, "success");
+  } catch (error) {
+    console.error("Printable HTML guide export failed", error);
+    updateArchiveStatus("\u6253\u5370\u7248 HTML \u65c5\u884c\u6307\u5357\u5bfc\u51fa\u5931\u8d25\uff0c\u5f53\u524d\u884c\u7a0b\u672a\u66f4\u6539\u3002", "error");
+  }
 }
 
 function downloadTextFile(text, filename, type) {
@@ -4098,7 +4103,8 @@ if (tripImportBtn && tripImportInput) {
 }
 if (tripImportInput) tripImportInput.addEventListener("change", importTripFile);
 if (exportTripFileBtn) exportTripFileBtn.addEventListener("click", exportTripFile);
-exportBtn.addEventListener("click", exportRoutes);
+if (exportMarkdownBtn) exportMarkdownBtn.addEventListener("click", exportMarkdownGuide);
+if (exportHtmlBtn) exportHtmlBtn.addEventListener("click", exportPrintableHtmlGuide);
 exitCityViewBtn.addEventListener("click", () => exitCityView());
 transportButtons.forEach((button) => button.addEventListener("click", () => setTransportMode(button.dataset.mode)));
 paceButtons.forEach((button) => button.addEventListener("click", () => setTripPace(button.dataset.pace)));

@@ -79,6 +79,25 @@ test("static page contains accessible trip editing, import and JSON export contr
   }
 });
 
+test("static page exposes distinct Markdown and printable HTML guide exports", async () => {
+  const html = await readFile(htmlUrl, "utf8");
+
+  for (const id of ["exportMarkdownBtn", "exportHtmlBtn"]) {
+    const matches = html.match(new RegExp(`\\bid=["']${id}["']`, "g")) ?? [];
+    assert.equal(matches.length, 1, `expected exactly one #${id}`);
+    assert.match(
+      html,
+      new RegExp(`<button\\b[^>]*\\bid=["']${id}["'][^>]*\\btype=["']button["'][^>]*\\bdisabled\\b`)
+    );
+  }
+
+  assert.match(
+    html,
+    /<[^>]+\bclass=["'][^"']*\bguide-export-actions\b[^"']*["'][^>]+\brole=["']group["']/
+  );
+  assert.doesNotMatch(html, /\bid=["']exportBtn["']/);
+});
+
 test("static page does not contain duplicate element IDs", async () => {
   const html = await readFile(htmlUrl, "utf8");
   const ids = [...html.matchAll(/\bid=["']([^"']+)["']/g)].map((match) => match[1]);
@@ -153,6 +172,50 @@ test("app wires visible trip import and JSON export controls", async () => {
   assert.match(app, /exportTripFileBtn\.disabled\s*=\s*!canExportTripFile\s*\(/);
   assert.match(app, /function\s+exportTripFile\s*\([^)]*\)[\s\S]*?tripFileExportPayload\s*\([\s\S]*?downloadTextFile\s*\(/);
   assert.match(app, /exportPayload\.kind\s*===\s*["']legacy-emergency["'][\s\S]*?clearEmergencyLegacyTrip\s*\(/);
+});
+
+test("app builds one TripPlan v2 guide model and wires both guide renderers", async () => {
+  const app = await readFile(appUrl, "utf8");
+
+  assert.match(
+    app,
+    /import\s*\{\s*buildGuideModel\s*,\s*buildMarkdownGuide\s*,\s*buildPrintableHtml\s*\}\s*from\s*["']\.\/guide-export\.js["']/
+  );
+  assert.match(app, /\bsafeTripNameForFile\b[\s\S]*?from\s+["']\.\/trip-archive\.js["']/);
+  assert.match(app, /querySelector\s*\(\s*["']#exportMarkdownBtn["']\s*\)/);
+  assert.match(app, /querySelector\s*\(\s*["']#exportHtmlBtn["']\s*\)/);
+  assert.match(
+    app,
+    /exportMarkdownBtn\.addEventListener\s*\(\s*["']click["']\s*,\s*exportMarkdownGuide\s*\)/
+  );
+  assert.match(
+    app,
+    /exportHtmlBtn\.addEventListener\s*\(\s*["']click["']\s*,\s*exportPrintableHtmlGuide\s*\)/
+  );
+
+  assert.equal(
+    (app.match(/\bbuildGuideModel\s*\(/g) ?? []).length,
+    1,
+    "expected one shared GuideModel construction"
+  );
+  assert.match(
+    app,
+    /function\s+buildCurrentGuideModel\s*\([^)]*\)\s*\{[\s\S]*?buildGuideModel\s*\(\s*\{[\s\S]*?plan:\s*state\.tripPlan[\s\S]*?placeSnapshots:[\s\S]*?warnings:\s*validateTripPlan\s*\(\s*plan\s*,\s*\{\s*paceProfile:\s*tripPaceProfile\s*\(\s*plan\.pace\s*\)[\s\S]*?routeSegments:[\s\S]*?totals:/
+  );
+  assert.match(
+    app,
+    /function\s+exportMarkdownGuide\s*\([^)]*\)\s*\{[\s\S]*?const\s+model\s*=\s*buildCurrentGuideModel\s*\(\s*\)[\s\S]*?buildMarkdownGuide\s*\(\s*model\s*\)[\s\S]*?downloadTextFile\s*\([\s\S]*?["']text\/markdown;charset=utf-8["']/
+  );
+  assert.match(
+    app,
+    /function\s+exportPrintableHtmlGuide\s*\([^)]*\)\s*\{[\s\S]*?const\s+model\s*=\s*buildCurrentGuideModel\s*\(\s*\)[\s\S]*?buildPrintableHtml\s*\(\s*model\s*\)[\s\S]*?downloadTextFile\s*\([\s\S]*?["']text\/html;charset=utf-8["']/
+  );
+  assert.match(app, /exportMarkdownBtn\.disabled\s*=\s*!hasCalendar/);
+  assert.match(app, /exportHtmlBtn\.disabled\s*=\s*!hasCalendar/);
+
+  for (const oldName of ["exportRoutes", "buildGuideData", "buildTravelGuideMarkdown"]) {
+    assert.doesNotMatch(app, new RegExp(`\\b${oldName}\\b`));
+  }
 });
 
 test("app wires v2 writes, recovery and legacy lifecycle through archive transactions", async () => {
@@ -230,6 +293,19 @@ test("calendar dialog styles include a scrollable mobile drawer and touch contro
   assert.match(css, /@media\s*\(max-width:\s*880px\)[\s\S]*?#tripItemDialog\b/);
   assert.match(css, /@media\s*\(max-width:\s*880px\)[\s\S]*?\.drag-handle\s*\{[\s\S]*?display:\s*none/);
   assert.match(css, /@media\s*\(max-width:\s*880px\)[\s\S]*?min-height:\s*40px/);
+});
+
+test("guide export actions keep two bounded columns without text overflow", async () => {
+  const css = await readFile(stylesUrl, "utf8");
+
+  assert.match(
+    css,
+    /\.guide-export-actions\s*\{[\s\S]*?grid-template-columns:\s*repeat\(2,\s*minmax\(0,\s*1fr\)\)/
+  );
+  assert.match(
+    css,
+    /\.guide-export-actions\s+\.icon-button\s*\{[\s\S]*?min-width:\s*0[\s\S]*?overflow-wrap:\s*anywhere/
+  );
 });
 
 test("renderPanel delegates calendar output and metadata controls use the commit path", async () => {
