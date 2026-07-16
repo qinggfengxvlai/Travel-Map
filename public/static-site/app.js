@@ -577,31 +577,51 @@ const paceButtons = Array.from(document.querySelectorAll("[data-pace]"));
 const exitCityViewBtn = document.querySelector("#exitCityViewBtn");
 const mapBadgeLabel = document.querySelector(".map-badge span");
 
-async function loadJson(path) {
-  const response = await fetch(`${path}?v=landmark-poi-4`, { cache: "no-store" });
+async function loadJson(path, options = {}) {
+  const response = await fetch(`${path}?v=landmark-poi-4`, {
+    cache: "no-store",
+    signal: options.signal
+  });
   if (!response.ok) throw new Error(`${path} HTTP ${response.status}`);
   return response.json();
 }
 
 async function loadOptionalJson(path, options = {}) {
+  const controller = options.timeoutMs ? new AbortController() : null;
+  const timeoutId = controller
+    ? window.setTimeout(() => controller.abort(), options.timeoutMs)
+    : null;
   try {
-    return await loadJson(path);
+    return await loadJson(path, { signal: controller ? controller.signal : undefined });
   } catch (error) {
     if (!options.quiet) console.warn("optional data unavailable", path, error);
     return null;
+  } finally {
+    if (timeoutId !== null) window.clearTimeout(timeoutId);
   }
 }
 
 async function loadMapData() {
-  const [mapData, cityData, countyData, foodData] = await Promise.all([
-    loadJson("./data/china-prefectures.json"),
+  const prefectureBoundaryPaths = Array.from(
+    { length: 8 },
+    (_, index) => `./data/china-prefectures-lite-${index + 1}.json`
+  );
+  const [mapChunks, cityData, countyData, foodData] = await Promise.all([
+    Promise.all(
+      prefectureBoundaryPaths.map((path) => loadOptionalJson(path, { timeoutMs: 20000 }))
+    ),
     loadJson("./data/china-cities.json"),
-    loadOptionalJson("./data/counties-summary.json"),
-    loadOptionalJson("./data/wechat-food-summary.json")
+    loadOptionalJson("./data/counties-summary.json", { timeoutMs: 6000 }),
+    loadOptionalJson("./data/wechat-food-summary.json", { timeoutMs: 6000 })
   ]);
 
   const cities = cityData && cityData.cities ? cityData.cities : [];
-  if (!mapData || !Array.isArray(mapData.features)) throw new Error("china-prefectures data is empty");
+  const validMapData = {
+    type: "FeatureCollection",
+    features: mapChunks.flatMap((chunk) => (
+      chunk && Array.isArray(chunk.features) ? chunk.features : []
+    ))
+  };
   if (!cities.length) throw new Error("china-cities data is empty");
 
   const displayCities = cities
@@ -613,7 +633,7 @@ async function loadMapData() {
   displayCities.push({ ...taiwanRegion });
 
   state.hiddenMunicipalityChildren = cities.filter((city) => municipalityNames.has(city.province) && city.name !== city.province);
-  state.mapData = mapData;
+  state.mapData = validMapData;
   state.cities = displayCities.map((city) => ({
     ...city,
     searchText: normalizeSearchText(`${city.name} ${city.province} ${city.pinyin}`)
@@ -1179,7 +1199,18 @@ function safeExternalUrl(value) {
 
 function fitChina() {
   if (!state.chinaLayer) return;
-  state.map.fitBounds(state.chinaLayer.getBounds(), {
+  const bounds = state.chinaLayer.getBounds();
+  if (bounds.isValid()) {
+    state.map.fitBounds(bounds, {
+      paddingTopLeft: [28, 28],
+      paddingBottomRight: [28, 28],
+      animate: false
+    });
+    return;
+  }
+  const fallbackBounds = L.latLngBounds(state.cities.map((city) => [city.lat, city.lon]));
+  if (!fallbackBounds.isValid()) return;
+  state.map.fitBounds(fallbackBounds, {
     paddingTopLeft: [28, 28],
     paddingBottomRight: [28, 28],
     animate: false

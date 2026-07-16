@@ -6,6 +6,10 @@ const htmlUrl = new URL("../public/static-site/index.html", import.meta.url);
 const appUrl = new URL("../public/static-site/app.js", import.meta.url);
 const stylesUrl = new URL("../public/static-site/styles.css", import.meta.url);
 const packageUrl = new URL("../package.json", import.meta.url);
+const litePrefectureUrls = Array.from(
+  { length: 8 },
+  (_, index) => new URL(`../public/static-site/data/china-prefectures-lite-${index + 1}.json`, import.meta.url)
+);
 const plannerIds = [
   "tripNameInput",
   "tripStartDateInput",
@@ -46,7 +50,7 @@ test("static page loads the versioned app entry as a module", async () => {
 
   assert.match(
     html,
-    /<script\s+type=["']module["']\s+src=["']\.\/app\.js\?v=calendar-planner-1["']><\/script>/
+    /<script\s+type=["']module["']\s+src=["']\.\/app\.js\?v=calendar-planner-5["']><\/script>/
   );
 });
 
@@ -128,6 +132,34 @@ test("app coordinates TripPlan through the calendar modules and one commit entry
     "expected one commitTripPlan definition"
   );
   assert.match(app, /function\s+syncRoutesFromTripPlan\s*\(/);
+});
+
+test("app keeps city planning available when the prefecture boundary file is unavailable", async () => {
+  const app = await readFile(appUrl, "utf8");
+
+  assert.match(app, /china-prefectures-lite-\$\{index \+ 1\}\.json/);
+  assert.match(app, /Promise\.all\s*\(\s*prefectureBoundaryPaths\.map/);
+  assert.match(app, /loadOptionalJson\s*\(\s*path,\s*\{\s*timeoutMs:\s*20000\s*\}\s*\)/);
+  assert.match(
+    app,
+    /const\s+validMapData\s*=\s*\{[\s\S]*?type:\s*["']FeatureCollection["'][\s\S]*?mapChunks\.flatMap/
+  );
+  assert.match(app, /if\s*\(\s*bounds\.isValid\s*\(\s*\)\s*\)/);
+  assert.match(app, /L\.latLngBounds\s*\(\s*state\.cities\.map/);
+  assert.doesNotMatch(app, /throw new Error\s*\(\s*["']china-prefectures data is empty["']\s*\)/);
+});
+
+test("lightweight prefecture boundaries retain every city within the startup budget", async () => {
+  const chunks = await Promise.all(
+    litePrefectureUrls.map(async (url) => {
+      const text = await readFile(url, "utf8");
+      assert.ok(Buffer.byteLength(text) < 35_000);
+      return JSON.parse(text);
+    })
+  );
+
+  assert.ok(chunks.every((data) => data.type === "FeatureCollection"));
+  assert.equal(chunks.reduce((total, data) => total + data.features.length, 0), 372);
 });
 
 test("app delegates archive behavior to the DOM-free trip archive module", async () => {
