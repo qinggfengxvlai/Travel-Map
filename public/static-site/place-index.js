@@ -17,7 +17,7 @@ export function normalizeSearchText(value) {
     .replace(/\s+/g, "");
 }
 
-export function buildMunicipalityCountyEntries(children, displayCities) {
+function buildMunicipalityCountyEntries(children, displayCities) {
   const municipalityNames = new Set(
     (Array.isArray(children) ? children : [])
       .map((child) => child && child.province)
@@ -48,19 +48,20 @@ export function buildMunicipalityCountyEntries(children, displayCities) {
   });
 }
 
-export function normalizeCountyRecord(county) {
+function normalizeCountyRecord(county) {
   if (!county || typeof county !== "object" || !county.id) return null;
+  const hasSearchText = Object.prototype.hasOwnProperty.call(county, "searchText");
   return {
     ...county,
     placeType: "county",
     searchType: "county",
-    searchText: county.searchText || normalizeSearchText(
+    searchText: hasSearchText ? String(county.searchText ?? "") : normalizeSearchText(
       `${county.name || ""} ${county.province || ""} ${county.pinyin || ""} ${county.parentCityName || ""} ${county.parentCityPinyin || ""}`
     )
   };
 }
 
-export function buildPlaceMap(cities, counties) {
+function buildPlaceMap(cities, counties) {
   const map = new Map();
   (Array.isArray(cities) ? cities : []).forEach((city) => {
     if (city && city.id) map.set(city.id, { ...city, placeType: "city" });
@@ -71,7 +72,7 @@ export function buildPlaceMap(cities, counties) {
   return map;
 }
 
-export function buildCityKeyMap(cities, municipalityChildren = []) {
+function buildCityKeyMap(cities, municipalityChildren = []) {
   const aliases = new Map([
     ["enshi", "enshi"],
     ["linzhi", "linzhi"],
@@ -100,7 +101,7 @@ export function buildCityKeyMap(cities, municipalityChildren = []) {
   return map;
 }
 
-export function buildCityProvinceKeyMap(cities, municipalityChildren = []) {
+function buildCityProvinceKeyMap(cities, municipalityChildren = []) {
   const cityList = Array.isArray(cities) ? cities : [];
   const map = new Map();
   const setCity = (city, province, keyValue) => {
@@ -151,7 +152,9 @@ export function createPlaceIndex({ cities, counties, municipalityChildren = [] }
       ...city,
       searchText: city.searchText || normalizeSearchText(`${city.name || ""} ${city.province || ""} ${city.pinyin || ""}`)
     }));
-  const children = Array.isArray(municipalityChildren) ? municipalityChildren : [];
+  const children = (Array.isArray(municipalityChildren) ? municipalityChildren : [])
+    .filter((child) => child && typeof child === "object")
+    .map((child) => ({ ...child }));
   const municipalityCounties = buildMunicipalityCountyEntries(children, cityList);
   const index = {
     cities: cityList,
@@ -167,9 +170,24 @@ export function hydrateCountySummary(index, records) {
   }
   const byId = new Map(index.counties.map((county) => [county.id, county]));
   const merged = [];
+  const identityFields = [
+    "name",
+    "pinyin",
+    "province",
+    "parentCityId",
+    "parentCityName",
+    "parentCityPinyin"
+  ];
   (Array.isArray(records) ? records : []).forEach((record) => {
     if (!record || typeof record !== "object" || !record.id) return;
-    const normalized = normalizeCountyRecord({ ...(byId.get(record.id) || {}), ...record });
+    const existing = byId.get(record.id);
+    const hasIncomingSearchText = Object.prototype.hasOwnProperty.call(record, "searchText");
+    const identityChanged = !existing || identityFields.some((field) => (
+      Object.prototype.hasOwnProperty.call(record, field) && record[field] !== existing[field]
+    ));
+    const candidate = { ...(existing || {}), ...record };
+    if (!hasIncomingSearchText && identityChanged) delete candidate.searchText;
+    const normalized = normalizeCountyRecord(candidate);
     if (!normalized) return;
     byId.set(normalized.id, normalized);
     merged.push(normalized);

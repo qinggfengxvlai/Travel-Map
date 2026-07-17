@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import * as placeIndexModule from "../public/static-site/place-index.js";
 
 import {
   createPlaceIndex,
@@ -20,6 +21,41 @@ const municipalityChildren = [
 test("normalizes Chinese search text and accented/spaced pinyin keys", () => {
   assert.equal(normalizeSearchText(" 北 京  Běi Jīng "), "北京beijing");
   assert.equal(normalizeKey("Lǚ-liáng Dìqū"), "luliang");
+});
+
+test("exposes only the stable place-index API", () => {
+  assert.deepEqual(Object.keys(placeIndexModule).sort(), [
+    "createPlaceIndex",
+    "hydrateCountySummary",
+    "normalizeKey",
+    "normalizeSearchText"
+  ]);
+});
+
+test("isolates the index from input arrays and their records", () => {
+  const cityInput = cities.map((city) => ({ ...city }));
+  const countyInput = [{ id: "county-input", name: "输入县", parentCityId: "lvliang" }];
+  const childInput = municipalityChildren.map((child) => ({ ...child }));
+  const index = createPlaceIndex({
+    cities: cityInput,
+    counties: countyInput,
+    municipalityChildren: childInput
+  });
+
+  cityInput.push({ id: "late-city", name: "后来市" });
+  countyInput.push({ id: "late-county", name: "后来县" });
+  childInput.push({ name: "后来区", pinyin: "Later", province: "北京" });
+  cityInput[0].name = "被外部修改";
+  countyInput[0].name = "被外部修改";
+  childInput[0].pinyin = "Mutated";
+
+  assert.equal(index.cities.length, cities.length);
+  assert.equal(index.placeById.has("late-city"), false);
+  assert.equal(index.placeById.has("late-county"), false);
+  assert.equal(index.municipalityChildren.length, municipalityChildren.length);
+  assert.equal(index.cityById.get("beijing").name, cities[0].name);
+  assert.equal(index.placeById.get("county-input").name, "输入县");
+  assert.equal(index.municipalityChildren[0].pinyin, municipalityChildren[0].pinyin);
 });
 
 test("creates municipality counties, aliases, and city key maps without a DOM", () => {
@@ -54,7 +90,7 @@ test("hydrates counties idempotently, deduplicates by id, and preserves cities",
   assert.equal(index.placeById.get("beijing").placeType, "city");
 });
 
-test("replaces a county by id while retaining omitted existing fields", () => {
+test("county replacement recomputes derived search text and retains omitted fields", () => {
   const index = createPlaceIndex({
     cities,
     municipalityChildren,
@@ -70,13 +106,30 @@ test("replaces a county by id while retaining omitted existing fields", () => {
     }]
   });
 
-  hydrateCountySummary(index, [{ id: "county-2", name: "新县名" }]);
+  hydrateCountySummary(index, [{
+    id: "county-2",
+    name: "新县名",
+    pinyin: "Xinxian",
+    parentCityId: "beijing",
+    parentCityName: "北京"
+  }]);
 
   const county = index.placeById.get("county-2");
   assert.equal(county.name, "新县名");
-  assert.equal(county.parentCityId, "lvliang");
+  assert.equal(county.parentCityId, "beijing");
   assert.equal(county.lon, 111);
-  assert.match(county.searchText, /旧县名/);
+  assert.match(county.searchText, /新县名/);
+  assert.match(county.searchText, /xinxian/);
+  assert.match(county.searchText, /北京/);
+  assert.doesNotMatch(county.searchText, /旧县名|jiuxian/);
+
+  hydrateCountySummary(index, [{
+    id: "county-2",
+    name: "自定义检索县",
+    searchText: "explicit-search-text"
+  }]);
+  assert.equal(index.placeById.get("county-2").searchText, "explicit-search-text");
+  assert.equal(index.placeById.get("county-2").lon, 111);
 });
 
 test("ignores malformed county records and rebuilds every derived map", () => {
