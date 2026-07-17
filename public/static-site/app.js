@@ -17,6 +17,7 @@ import {
 } from "./trip-plan.js";
 import {
   LEGACY_TRIP_BACKUP_KEY,
+  MissingTripPlacesError,
   backupLegacyTripRaw,
   canExportTripFile,
   captureTripArchiveSnapshot,
@@ -25,9 +26,11 @@ import {
   finalizeLegacyMigration,
   isLegacyTripPayload,
   legacyMigrationPending,
+  prepareLegacyRecoveryData,
   readTripRecoveryCandidates,
   restoreTripArchiveSnapshot,
   safeTripNameForFile,
+  selectTripRecoveryCandidate,
   shareUrlForTrip,
   tripFileExportPayload,
   tripFileName,
@@ -46,9 +49,13 @@ import {
   restoreTripEditorFocus
 } from "./trip-editor.js";
 import {
+  classifyDeferredSummaryData,
   createJsonLoader,
   createDeferredDataLoaders,
+  isCountyRecordsPayload,
+  isFoodArticlesPayload,
   loadCriticalMapData,
+  mergeProgressiveFoodArticles,
   scheduleIdle
 } from "./app-data.js";
 
@@ -530,7 +537,10 @@ const state = {
   counties: [],
   hiddenMunicipalityChildren: [],
   mapData: null,
-  failedBoundaryPaths: []
+  failedBoundaryPaths: [],
+  missingOptionalDatasets: [],
+  deferredInternalError: false,
+  panelBaseHint: ""
 };
 
 const selectionTitle = document.querySelector("#selectionTitle");
@@ -625,31 +635,43 @@ function rebuildPlaceIndexes() {
 async function hydrateDeferredSummaries() {
   const countyRequest = deferredData.loadCountySummary();
   const foodRequest = deferredData.loadFoodSummary();
-  const [countyData, foodData] = await Promise.all([countyRequest, foodRequest]);
+  const [countyResult, foodResult] = await Promise.allSettled([countyRequest, foodRequest]);
+  const countyData = countyResult.status === "fulfilled" ? countyResult.value : null;
+  const foodData = foodResult.status === "fulfilled" ? foodResult.value : null;
+  const status = classifyDeferredSummaryData({ countyData, foodData });
+  state.missingOptionalDatasets = status.missingDatasets;
+  state.deferredInternalError = false;
 
-  if (countyData && Array.isArray(countyData.counties)) {
+  if (status.countyValid) {
     mergeCountyRecords(countyData.counties);
     rebuildPlaceIndexes();
-    if (shouldRetryTripRestoreAfterCountyHydration && !state.tripPlan) {
+    if (shouldRetryTripRestoreAfterCountyHydration) {
       shouldRetryTripRestoreAfterCountyHydration = false;
       restoreTripState();
     }
   }
 
-  hydrateFoodArticles(foodData);
+  if (status.foodValid) hydrateFoodArticles(foodData);
   updateSearchResults();
   renderFoodPanel();
   renderPanel();
-  if (state.failedBoundaryPaths.length) showBoundaryLoadHint();
+  if (countyResult.status === "rejected" || foodResult.status === "rejected") {
+    throw new AggregateError(
+      [countyResult, foodResult]
+        .filter((result) => result.status === "rejected")
+        .map((result) => result.reason),
+      "deferred summary loading failed"
+    );
+  }
+  return status;
 }
 
 function hydrateFoodArticles(foodData) {
-  const knownPlaces = state.placeById;
-  state.foodArticles = (foodData && Array.isArray(foodData.articles) ? foodData.articles : [])
-    .filter((article) => knownPlaces.has(article.placeId) || knownPlaces.has(article.cityId))
-    .map(normalizeFoodArticleRecord)
-    .sort((a, b) => Number(a.day || 0) - Number(b.day || 0));
+  if (!isFoodArticlesPayload(foodData)) return [];
+  return mergeFoodArticleRecords(foodData.articles, { incomingSource: "summary" });
+}
 
+function rebuildFoodArticleIndexes() {
   state.foodArticleById = new Map(state.foodArticles.map((article) => [article.id, article]));
   state.foodArticlesByCity = groupArticlesBy("cityId");
   state.foodArticlesByPlace = groupArticlesBy("placeId");
@@ -663,19 +685,20 @@ function normalizeFoodArticleRecord(article) {
   };
 }
 
-function mergeFoodArticleRecords(articles) {
+function mergeFoodArticleRecords(articles, { incomingSource = "city" } = {}) {
   if (!Array.isArray(articles) || !articles.length) return [];
-  const byId = new Map(state.foodArticles.map((article) => [article.id, article]));
-  const merged = articles.map((article) => {
-    const record = normalizeFoodArticleRecord({ ...(byId.get(article.id) || {}), ...article });
-    byId.set(record.id, record);
-    state.foodArticleById.set(record.id, record);
-    return record;
-  });
-  state.foodArticles = Array.from(byId.values()).sort((a, b) => Number(a.day || 0) - Number(b.day || 0));
-  state.foodArticlesByCity = groupArticlesBy("cityId");
-  state.foodArticlesByPlace = groupArticlesBy("placeId");
-  return merged;
+  const knownPlaces = state.placeById;
+  const normalized = articles
+    .filter((article) => knownPlaces.has(article.placeId) || knownPlaces.has(article.cityId))
+    .map(normalizeFoodArticleRecord);
+  state.foodArticles = mergeProgressiveFoodArticles(
+    state.foodArticles,
+    normalized,
+    { incomingSource }
+  ).sort((a, b) => Number(a.day || 0) - Number(b.day || 0));
+  rebuildFoodArticleIndexes();
+  const mergedIds = new Set(normalized.map((article) => article.id));
+  return state.foodArticles.filter((article) => mergedIds.has(article.id));
 }
 
 function groupArticlesBy(field) {
@@ -1351,6 +1374,9 @@ function commitTripPlan(nextPlan, {
   focusToken = null,
   completeLegacyMigration = true
 } = {}) {
+  // Any committed plan (including clearing the current plan) is newer user-visible
+  // state than a recovery attempt that was deferred during startup.
+  shouldRetryTripRestoreAfterCountyHydration = false;
   if (recordHistory && state.tripPlan && state.tripPlan !== nextPlan) {
     state.tripHistory.push(structuredClone(state.tripPlan));
   }
@@ -1670,6 +1696,25 @@ function autoScheduleCurrentTrip() {
   });
 }
 
+function renderOperationalWarnings() {
+  const warnings = [];
+  const warningIds = [];
+  if (state.failedBoundaryPaths.length) {
+    warningIds.push("boundaries");
+    warnings.push(`\u90e8\u5206\u5730\u56fe\u8fb9\u754c\u6682\u672a\u52a0\u8f7d\uff08${state.failedBoundaryPaths.length} \u4e2a\u5206\u5757\uff09\uff0c\u57ce\u5e02\u884c\u7a0b\u89c4\u5212\u4ecd\u53ef\u6b63\u5e38\u4f7f\u7528\u3002`);
+  }
+  if (state.missingOptionalDatasets.length) {
+    warningIds.push(...state.missingOptionalDatasets);
+    warnings.push(`\u53ef\u9009\u6570\u636e\u6682\u4e0d\u53ef\u7528\uff1a${state.missingOptionalDatasets.join(", ")}\u3002`);
+  }
+  if (state.deferredInternalError) {
+    warningIds.push("internal");
+    warnings.push("\u53ef\u9009\u6570\u636e\u5904\u7406\u53d1\u751f\u5185\u90e8\u9519\u8bef\uff0c\u5730\u56fe\u4ecd\u53ef\u4f7f\u7528\u3002");
+  }
+  selectionHint.dataset.operationalWarnings = warningIds.join(",");
+  selectionHint.textContent = [state.panelBaseHint, ...warnings].filter(Boolean).join(" ");
+}
+
 function renderPanel() {
   const selected = placeById(state.selectedCityId);
   syncTransportButtons();
@@ -1692,6 +1737,8 @@ function renderPanel() {
     selectionTitle.textContent = labels.chooseStart;
     selectionHint.textContent = labels.chooseHint;
   }
+  state.panelBaseHint = selectionHint.textContent;
+  renderOperationalWarnings();
 
   routeList.replaceChildren();
   state.routes.forEach((route, index) => {
@@ -2227,26 +2274,10 @@ function prepareTripMigration(data, { allowLegacy = false } = {}) {
   }
 
   if (!isLegacyTripPayload(data)) throw new TypeError("旧版行程格式无效");
-  const routes = (Array.isArray(data.routes) ? data.routes : [])
-    .filter((route) => {
-      if (!isTripStateRecord(route)) return false;
-      const from = tripIdentifier(route.from);
-      const to = tripIdentifier(route.to);
-      return Boolean(from && to && placeById(from) && placeById(to));
-    })
-    .map((route) => ({
-      ...route,
-      from: tripIdentifier(route.from),
-      to: tripIdentifier(route.to)
-    }));
-  const selectedCityId = tripIdentifier(data.selectedCityId);
+  const legacyData = prepareLegacyRecoveryData(data);
   const pace = tripPaceProfiles[data.tripPace] ? data.tripPace : state.tripPace;
   return {
-    data: {
-      ...data,
-      routes,
-      selectedCityId: selectedCityId && placeById(selectedCityId) ? selectedCityId : null
-    },
+    data: legacyData,
     isLegacy: true,
     paceProfile: tripPaceProfile(pace)
   };
@@ -2254,8 +2285,12 @@ function prepareTripMigration(data, { allowLegacy = false } = {}) {
 
 function assertTripPlanCanRender(plan, { isLegacy = false } = {}) {
   const placeIds = routePlaceIds(plan);
-  if (placeIds.some((placeId) => !placeById(placeId))) {
+  const missingPlaceIds = placeIds.filter((placeId) => !placeById(placeId));
+  if (missingPlaceIds.length) {
+    throw new MissingTripPlacesError(missingPlaceIds);
+    /* obsolete missing-place error
     throw new TypeError("行程包含当前地图无法识别的地点");
+    */
   }
   if (isLegacy && !placeIds.length) {
     throw new TypeError("旧版行程没有可恢复的地点");
@@ -2338,10 +2373,39 @@ function restoreTripState() {
     legacyTripBackupPending = false;
     failures.add("旧版迁移状态读取失败");
   }
-  const candidates = readTripRecoveryCandidates({
+  let candidates = readTripRecoveryCandidates({
     storage: tripArchiveStorage,
     currentUrl: window.location.href
   });
+
+  const recovery = selectTripRecoveryCandidate(candidates, (candidate) => {
+    const data = JSON.parse(candidate.raw);
+    const prepared = prepareTripMigration(data, { allowLegacy: candidate.allowLegacy });
+    if (candidate.requireLegacy && !prepared.isLegacy) {
+      throw new TypeError("Legacy recovery storage does not contain a v1 trip");
+    }
+    const migrated = migrateTripState(prepared.data, { paceProfile: prepared.paceProfile });
+    const plan = normalizeTripPlan(migrated);
+    assertTripPlanCanRender(plan, { isLegacy: prepared.isLegacy });
+    return { prepared, plan };
+  });
+
+  recovery.failures.forEach(({ candidate }) => {
+    failures.add(candidate.error ? `${candidate.label} read failed` : `${candidate.label} invalid`);
+  });
+  if (recovery.status === "deferred") {
+    updateArchiveStatus("Saved trip recovery is waiting for optional place data.", "pending");
+    return {
+      status: "deferred",
+      source: recovery.candidate.source,
+      missingPlaceIds: recovery.error.missingPlaceIds
+    };
+  }
+  if (recovery.status === "ready") {
+    candidates = [{ ...recovery.candidate, recovered: recovery.value }];
+  } else {
+    candidates = [];
+  }
 
   for (const candidate of candidates) {
     if (candidate.error) {
@@ -2354,8 +2418,7 @@ function restoreTripState() {
     let backupTouched = false;
     let commitAttempted = false;
     try {
-      const data = JSON.parse(candidate.raw);
-      const prepared = prepareTripMigration(data, { allowLegacy: candidate.allowLegacy });
+      const { prepared, plan } = candidate.recovered;
       if (candidate.requireLegacy && !prepared.isLegacy) {
         throw new TypeError("旧版存档键中不是 v1 行程");
       }
@@ -2382,10 +2445,6 @@ function restoreTripState() {
         backupTouched = true;
         legacyTripBackupPending = true;
       }
-      const migrated = migrateTripState(prepared.data, { paceProfile: prepared.paceProfile });
-      const plan = normalizeTripPlan(migrated);
-      assertTripPlanCanRender(plan, { isLegacy: prepared.isLegacy });
-
       commitAttempted = true;
       const committed = commitTripPlan(plan, {
         recordHistory: false,
@@ -2393,8 +2452,10 @@ function restoreTripState() {
         message: restoredTripMessage(candidate.source, failures)
       });
       clearEmergencyLegacyTrip();
-      if (!committed) return true;
-      return true;
+      return {
+        status: committed ? "restored" : "restored-with-persistence-error",
+        source: candidate.source
+      };
     } catch (error) {
       if (backupTouched && !commitAttempted) {
         const rollback = restoreTripArchiveSnapshot({
@@ -2429,7 +2490,7 @@ function restoreTripState() {
   } else {
     updateArchiveStatus("行程会自动保存到本机。");
   }
-  return false;
+  return { status: "unavailable" };
 }
 
 function downloadTripFile(plan) {
@@ -2534,6 +2595,9 @@ async function importTripFile(event) {
     rawText = await file.text();
     const data = JSON.parse(rawText);
     const prepared = prepareTripMigration(data, { allowLegacy: true });
+    const migrated = migrateTripState(prepared.data, { paceProfile: prepared.paceProfile });
+    const plan = normalizeTripPlan(migrated);
+    assertTripPlanCanRender(plan, { isLegacy: prepared.isLegacy });
     if (prepared.isLegacy) {
       try {
         snapshot = captureTripImportSnapshot();
@@ -2555,9 +2619,6 @@ async function importTripFile(event) {
       legacyTripBackupPending = true;
     }
 
-    const migrated = migrateTripState(prepared.data, { paceProfile: prepared.paceProfile });
-    const plan = normalizeTripPlan(migrated);
-    assertTripPlanCanRender(plan, { isLegacy: prepared.isLegacy });
     if (!snapshot) {
       try {
         snapshot = captureTripImportSnapshot();
@@ -3597,7 +3658,8 @@ async function ensureCityCounties(cityId) {
 
   const promise = loadOptionalJson(`./data/counties/by-city/${cityId}.json`, { quiet: true })
     .then((data) => {
-      const counties = data && Array.isArray(data.counties) ? data.counties : [];
+      if (!isCountyRecordsPayload(data)) return citySubareas(cityById(cityId));
+      const counties = data.counties;
       mergeCountyRecords(counties);
       state.loadedCountyCityIds.add(cityId);
       return counties;
@@ -3614,8 +3676,9 @@ async function ensureCityFoodArticles(cityId) {
 
   const promise = loadOptionalJson(`./data/food-articles/by-city/${cityId}.json`, { quiet: true })
     .then((data) => {
-      const articles = data && Array.isArray(data.articles) ? data.articles : [];
-      mergeFoodArticleRecords(articles);
+      if (!isFoodArticlesPayload(data)) return articlesForCity(cityId);
+      const articles = data.articles;
+      mergeFoodArticleRecords(articles, { incomingSource: "city" });
       state.loadedFoodArticleCityIds.add(cityId);
       return articles;
     })
@@ -4098,11 +4161,25 @@ function timestampForFile() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
-function showBoundaryLoadHint() {
-  const failedCount = state.failedBoundaryPaths.length;
-  if (!failedCount) return;
-  selectionHint.dataset.boundaryLoad = "partial";
-  selectionHint.textContent = `${selectionHint.textContent} \u90e8\u5206\u5730\u56fe\u8fb9\u754c\u6682\u672a\u52a0\u8f7d\uff08${failedCount} \u4e2a\u5206\u5757\uff09\uff0c\u57ce\u5e02\u884c\u7a0b\u89c4\u5212\u4ecd\u53ef\u6b63\u5e38\u4f7f\u7528\u3002`;
+function applyDeferredReadiness(status) {
+  document.documentElement.dataset.appReady = status.readiness;
+  if (status.missingDatasets.length) {
+    document.documentElement.dataset.missingDatasets = status.missingDatasets.join(",");
+  } else {
+    delete document.documentElement.dataset.missingDatasets;
+  }
+  delete document.documentElement.dataset.deferredError;
+}
+
+function applyDeferredInternalFailure(error) {
+  state.deferredInternalError = true;
+  document.documentElement.dataset.appReady = "degraded";
+  document.documentElement.dataset.deferredError = "internal";
+  if (state.missingOptionalDatasets.length) {
+    document.documentElement.dataset.missingDatasets = state.missingOptionalDatasets.join(",");
+  }
+  renderOperationalWarnings();
+  console.warn("deferred summaries unavailable", error);
 }
 
 async function initApp() {
@@ -4111,19 +4188,16 @@ async function initApp() {
     selectionHint.textContent = "\u6b63\u5728\u8bfb\u53d6\u672c\u5730 GeoJSON \u548c\u57ce\u5e02\u5750\u6807\u6570\u636e...";
     await loadMapData();
     initMap();
-    restoreTripState();
-    shouldRetryTripRestoreAfterCountyHydration = !state.tripPlan;
+    const initialRecovery = restoreTripState();
+    shouldRetryTripRestoreAfterCountyHydration = initialRecovery.status === "deferred";
     setMobileView("plan");
     renderRoutes();
     renderPanel();
-    if (state.failedBoundaryPaths.length) showBoundaryLoadHint();
     document.documentElement.dataset.appReady = "map";
     scheduleIdle(() => {
       hydrateDeferredSummaries()
-        .catch((error) => console.warn("deferred summaries unavailable", error))
-        .finally(() => {
-          document.documentElement.dataset.appReady = "complete";
-        });
+        .then((status) => applyDeferredReadiness(status))
+        .catch((error) => applyDeferredInternalFailure(error));
     });
   } catch (error) {
     console.error(error);

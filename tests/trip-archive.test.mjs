@@ -2,6 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import {
   LEGACY_TRIP_BACKUP_KEY,
+  MissingTripPlacesError,
   backupLegacyTripRaw,
   canExportTripFile,
   captureTripArchiveSnapshot,
@@ -10,9 +11,11 @@ import {
   finalizeLegacyMigration,
   isLegacyTripPayload,
   legacyMigrationPending,
+  prepareLegacyRecoveryData,
   readTripRecoveryCandidates,
   restoreTripArchiveSnapshot,
   safeTripNameForFile,
+  selectTripRecoveryCandidate,
   shareUrlForTrip,
   tripFileExportPayload,
   tripFileName,
@@ -85,6 +88,65 @@ test("recovery candidates keep hash, v2 and v1 priority while isolating storage 
   assert.deepEqual(withFailure.map(({ source }) => source), ["storage", "legacy"]);
   assert.equal(withFailure[0].error.name, "SecurityError");
   assert.equal(withFailure[1].raw, v1);
+});
+
+test("legacy recovery preparation retains mixed city and county endpoint IDs", () => {
+  const legacy = {
+    version: 1,
+    selectedCityId: "chengdu-jinjiang",
+    routes: [
+      { from: " chengdu ", to: "chengdu-jinjiang", distance: 12 },
+      { from: "chengdu-jinjiang", to: "leshan", distance: 88 },
+      { from: "", to: "leshan" },
+      null
+    ]
+  };
+
+  const prepared = prepareLegacyRecoveryData(legacy);
+
+  assert.deepEqual(prepared.routes, [
+    { from: "chengdu", to: "chengdu-jinjiang", distance: 12 },
+    { from: "chengdu-jinjiang", to: "leshan", distance: 88 }
+  ]);
+  assert.equal(prepared.selectedCityId, "chengdu-jinjiang");
+});
+
+test("missing places defer the highest-priority candidate without falling back", () => {
+  const candidates = [
+    { source: "hash", label: "shared", raw: "hash-v2" },
+    { source: "storage", label: "local", raw: "local-v2" }
+  ];
+  const evaluated = [];
+
+  const result = selectTripRecoveryCandidate(candidates, (candidate) => {
+    evaluated.push(candidate.source);
+    if (candidate.source === "hash") {
+      throw new MissingTripPlacesError(["chengdu-jinjiang"]);
+    }
+    return { id: "local-plan" };
+  });
+
+  assert.equal(result.status, "deferred");
+  assert.equal(result.candidate.source, "hash");
+  assert.deepEqual(result.error.missingPlaceIds, ["chengdu-jinjiang"]);
+  assert.deepEqual(evaluated, ["hash"]);
+});
+
+test("invalid candidates still fall back while preserving failure order", () => {
+  const candidates = [
+    { source: "hash", label: "shared", raw: "broken" },
+    { source: "storage", label: "local", raw: "valid" }
+  ];
+
+  const result = selectTripRecoveryCandidate(candidates, (candidate) => {
+    if (candidate.source === "hash") throw new SyntaxError("broken JSON");
+    return { id: "local-plan" };
+  });
+
+  assert.equal(result.status, "ready");
+  assert.equal(result.candidate.source, "storage");
+  assert.deepEqual(result.value, { id: "local-plan" });
+  assert.deepEqual(result.failures.map(({ candidate }) => candidate.source), ["hash"]);
 });
 
 test("lazy storage adapter defers and contains a throwing localStorage getter", () => {

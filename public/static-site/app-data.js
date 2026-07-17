@@ -1,5 +1,53 @@
 export const ASSET_VERSION = "progressive-1";
 export const PREFECTURE_CHUNK_COUNT = 8;
+export const DEFERRED_DATASET_IDS = Object.freeze({
+  counties: "counties-summary",
+  food: "wechat-food-summary"
+});
+
+export function isCountyRecordsPayload(value) {
+  return Boolean(value) && typeof value === "object" && Array.isArray(value.counties);
+}
+
+export function isFoodArticlesPayload(value) {
+  return Boolean(value) && typeof value === "object" && Array.isArray(value.articles);
+}
+
+export function classifyDeferredSummaryData({ countyData, foodData }) {
+  const countyValid = isCountyRecordsPayload(countyData);
+  const foodValid = isFoodArticlesPayload(foodData);
+  const missingDatasets = [
+    ...(!countyValid ? [DEFERRED_DATASET_IDS.counties] : []),
+    ...(!foodValid ? [DEFERRED_DATASET_IDS.food] : [])
+  ];
+  return {
+    readiness: missingDatasets.length ? "degraded" : "complete",
+    countyValid,
+    foodValid,
+    missingDatasets
+  };
+}
+
+export function mergeProgressiveFoodArticles(existing, incoming, { incomingSource } = {}) {
+  if (!Array.isArray(incoming)) return existing;
+  const current = Array.isArray(existing) ? existing : [];
+  const byId = new Map(current.map((article) => [article.id, article]));
+  incoming.forEach((article) => {
+    if (!article || typeof article !== "object" || typeof article.id !== "string" || !article.id) return;
+    const previous = byId.get(article.id);
+    if (!previous) {
+      byId.set(article.id, article);
+      return;
+    }
+    byId.set(
+      article.id,
+      incomingSource === "city"
+        ? { ...previous, ...article }
+        : { ...article, ...previous }
+    );
+  });
+  return Array.from(byId.values());
+}
 
 function withVersion(path, version) {
   const separator = path.includes("?") ? "&" : "?";

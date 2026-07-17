@@ -3,10 +3,15 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import {
   ASSET_VERSION,
+  DEFERRED_DATASET_IDS,
   PREFECTURE_CHUNK_COUNT,
+  classifyDeferredSummaryData,
   createDeferredDataLoaders,
   createJsonLoader,
+  isCountyRecordsPayload,
+  isFoodArticlesPayload,
   loadCriticalMapData,
+  mergeProgressiveFoodArticles,
   scheduleIdle
 } from "../public/static-site/app-data.js";
 
@@ -138,6 +143,95 @@ test("deferred county and food requests are independently memoized", async () =>
   assert.equal(calls.filter(({ path }) => path.includes("counties-summary")).length, 1);
   assert.equal(calls.filter(({ path }) => path.includes("wechat-food-summary")).length, 1);
   assert.ok(calls.every(({ options }) => options.timeoutMs === 30_000 && options.retries === 1));
+});
+
+test("deferred summary status identifies county and food failures independently", () => {
+  const counties = { counties: [] };
+  const food = { articles: [] };
+
+  assert.deepEqual(classifyDeferredSummaryData({ countyData: counties, foodData: food }), {
+    readiness: "complete",
+    countyValid: true,
+    foodValid: true,
+    missingDatasets: []
+  });
+  assert.deepEqual(
+    classifyDeferredSummaryData({ countyData: null, foodData: food }),
+    {
+      readiness: "degraded",
+      countyValid: false,
+      foodValid: true,
+      missingDatasets: [DEFERRED_DATASET_IDS.counties]
+    }
+  );
+  assert.deepEqual(
+    classifyDeferredSummaryData({ countyData: counties, foodData: { articles: null } }),
+    {
+      readiness: "degraded",
+      countyValid: true,
+      foodValid: false,
+      missingDatasets: [DEFERRED_DATASET_IDS.food]
+    }
+  );
+  assert.deepEqual(
+    classifyDeferredSummaryData({ countyData: {}, foodData: undefined }),
+    {
+      readiness: "degraded",
+      countyValid: false,
+      foodValid: false,
+      missingDatasets: [DEFERRED_DATASET_IDS.counties, DEFERRED_DATASET_IDS.food]
+    }
+  );
+  assert.equal(isCountyRecordsPayload({ counties: [] }), true);
+  assert.equal(isCountyRecordsPayload({ counties: null }), false);
+  assert.equal(isFoodArticlesPayload({ articles: [] }), true);
+  assert.equal(isFoodArticlesPayload(null), false);
+});
+
+test("per-city food fields win over summaries in both completion orders", () => {
+  const summary = [{
+    id: "food-1",
+    cityId: "chengdu",
+    title: "summary title",
+    description: "summary description",
+    day: 2
+  }];
+  const city = [{
+    id: "food-1",
+    cityId: "chengdu",
+    placeId: "chengdu-jinjiang",
+    title: "full city title",
+    description: "full city description",
+    foods: ["mapo tofu"],
+    sourceUrl: "https://example.test/full"
+  }];
+
+  const summaryThenCity = mergeProgressiveFoodArticles(
+    mergeProgressiveFoodArticles([], summary, { incomingSource: "summary" }),
+    city,
+    { incomingSource: "city" }
+  );
+  const cityThenSummary = mergeProgressiveFoodArticles(
+    mergeProgressiveFoodArticles([], city, { incomingSource: "city" }),
+    summary,
+    { incomingSource: "summary" }
+  );
+
+  assert.deepEqual(summaryThenCity, cityThenSummary);
+  assert.deepEqual(summaryThenCity, [{ ...summary[0], ...city[0] }]);
+});
+
+test("null or malformed food summaries are no-ops", () => {
+  const existing = [{ id: "food-1", title: "full city record" }];
+
+  assert.strictEqual(
+    mergeProgressiveFoodArticles(existing, null, { incomingSource: "summary" }),
+    existing
+  );
+  assert.strictEqual(
+    mergeProgressiveFoodArticles(existing, {}, { incomingSource: "summary" }),
+    existing
+  );
 });
 
 test("versioned JSON uses force-cache, combines signals, and retries once", async () => {

@@ -36,32 +36,78 @@ const tripItemFormNames = [
   "note"
 ];
 
+function balancedCodeBlock(source, bodyStart, label) {
+  let depth = 0;
+  let mode = "code";
+  for (let index = bodyStart; index < source.length; index += 1) {
+    const char = source[index];
+    const next = source[index + 1];
+    if (mode === "line-comment") {
+      if (char === "\n") mode = "code";
+      continue;
+    }
+    if (mode === "block-comment") {
+      if (char === "*" && next === "/") {
+        mode = "code";
+        index += 1;
+      }
+      continue;
+    }
+    if (mode !== "code") {
+      if (char === "\\") index += 1;
+      else if (char === mode) mode = "code";
+      continue;
+    }
+    if (char === "/" && next === "/") {
+      mode = "line-comment";
+      index += 1;
+      continue;
+    }
+    if (char === "/" && next === "*") {
+      mode = "block-comment";
+      index += 1;
+      continue;
+    }
+    if (char === '"' || char === "'" || char === "`") {
+      mode = char;
+      continue;
+    }
+    if (char === "{") depth += 1;
+    if (char === "}") depth -= 1;
+    if (depth === 0) return source.slice(bodyStart, index + 1);
+  }
+  assert.fail(`expected complete ${label} body`);
+}
+
+function matchingParen(source, openIndex, label) {
+  let depth = 0;
+  for (let index = openIndex; index < source.length; index += 1) {
+    if (source[index] === "(") depth += 1;
+    if (source[index] === ")") depth -= 1;
+    if (depth === 0) return index;
+  }
+  assert.fail(`expected complete ${label} parameters`);
+}
+
 function functionSource(source, name) {
   const signature = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\(`);
   const start = source.search(signature);
   assert.notEqual(start, -1, `expected ${name} function`);
-  const bodyStart = source.indexOf("{", start);
-  let depth = 0;
-  for (let index = bodyStart; index < source.length; index += 1) {
-    if (source[index] === "{") depth += 1;
-    if (source[index] === "}") depth -= 1;
-    if (depth === 0) return source.slice(start, index + 1);
-  }
-  assert.fail(`expected complete ${name} function body`);
+  const parametersStart = source.indexOf("(", start);
+  const parametersEnd = matchingParen(source, parametersStart, name);
+  const bodyStart = source.indexOf("{", parametersEnd);
+  const body = balancedCodeBlock(source, bodyStart, name);
+  return source.slice(start, bodyStart) + body;
 }
 
 function arrowCallCallbackSource(source, callName) {
-  const signature = new RegExp(`\\b${callName}\\s*\\(\\s*\\(\\s*\\)\\s*=>\\s*\\{`);
+  const signature = new RegExp(`\\b${callName}\\s*\\(`);
   const match = signature.exec(source);
   assert.ok(match, `expected ${callName} arrow callback`);
-  const bodyStart = match.index + match[0].lastIndexOf("{");
-  let depth = 0;
-  for (let index = bodyStart; index < source.length; index += 1) {
-    if (source[index] === "{") depth += 1;
-    if (source[index] === "}") depth -= 1;
-    if (depth === 0) return source.slice(bodyStart, index + 1);
-  }
-  assert.fail(`expected complete ${callName} arrow callback body`);
+  const arrow = source.indexOf("=>", match.index + match[0].length);
+  assert.notEqual(arrow, -1, `expected ${callName} arrow callback`);
+  const bodyStart = source.indexOf("{", arrow + 2);
+  return balancedCodeBlock(source, bodyStart, `${callName} arrow callback`);
 }
 
 test("arrow callback extraction excludes statements after the scheduled callback", () => {
@@ -69,6 +115,22 @@ test("arrow callback extraction excludes statements after the scheduled callback
   const callback = arrowCallCallbackSource(incorrectStartup, "scheduleIdle");
 
   assert.doesNotMatch(callback, /hydrateDeferredSummaries/);
+});
+
+test("arrow callback extraction ignores braces in templates and comments with destructured args", () => {
+  const source = `
+    scheduleIdle(({ deadline }) => {
+      const message = \`brace } and interpolation \${deadline ? "{" : "}"}\`;
+      // A comment must not close the callback: }
+      /* Nor should a block comment: { } */
+      hydrateDeferredSummaries(message);
+    });
+    hydrateDeferredSummaries("outside");
+  `;
+
+  const callback = arrowCallCallbackSource(source, "scheduleIdle");
+  assert.match(callback, /hydrateDeferredSummaries\(message\)/);
+  assert.doesNotMatch(callback, /outside/);
 });
 
 test("static page exposes each calendar planner control exactly once", async () => {
@@ -197,11 +259,11 @@ test("app renders critical map data before hydrating optional summaries", async 
   const deferredHydration = functionSource(app, "hydrateDeferredSummaries");
   assert.match(deferredHydration, /loadCountySummary\s*\(/);
   assert.match(deferredHydration, /loadFoodSummary\s*\(/);
-  assert.match(deferredHydration, /Promise\.all\s*\(/);
+  assert.match(deferredHydration, /Promise\.allSettled\s*\(/);
   assert.match(deferredHydration, /mergeCountyRecords\s*\(/);
   assert.match(
     deferredHydration,
-    /shouldRetryTripRestoreAfterCountyHydration\s*&&\s*!state\.tripPlan[\s\S]*?restoreTripState\s*\(/
+    /if\s*\(\s*shouldRetryTripRestoreAfterCountyHydration\s*\)[\s\S]*?restoreTripState\s*\(/
   );
   assert.match(deferredHydration, /updateSearchResults\s*\(/);
   assert.match(deferredHydration, /renderFoodPanel\s*\(/);
@@ -230,18 +292,72 @@ test("app renders critical map data before hydrating optional summaries", async 
   assert.match(idleCallback, /hydrateDeferredSummaries\s*\(\s*\)/);
   assert.match(
     idleCallback,
-    /hydrateDeferredSummaries\s*\(\s*\)[\s\S]*?\.finally\s*\([\s\S]*?dataset\.appReady\s*=\s*["']complete["']/
+    /hydrateDeferredSummaries\s*\(\s*\)[\s\S]*?\.then\s*\([\s\S]*?applyDeferredReadiness/
   );
-  assert.match(initApp, /shouldRetryTripRestoreAfterCountyHydration\s*=\s*!state\.tripPlan/);
+  assert.match(initApp, /shouldRetryTripRestoreAfterCountyHydration\s*=\s*initialRecovery\.status\s*===\s*["']deferred["']/);
   assert.match(app, /failedBoundaryPaths:\s*\[\]/);
   assert.match(loadMapData, /state\.failedBoundaryPaths\s*=/);
-  assert.match(initApp, /state\.failedBoundaryPaths\.length[\s\S]*?showBoundaryLoadHint\s*\(/);
+  assert.match(app, /state\.failedBoundaryPaths\.length[\s\S]*?renderOperationalWarnings/);
 
   assert.match(app, /if\s*\(\s*bounds\.isValid\s*\(\s*\)\s*\)/);
   assert.match(app, /L\.latLngBounds\s*\(\s*state\.cities\.map/);
   assert.doesNotMatch(app, /throw new Error\s*\(\s*["']china-prefectures data is empty["']\s*\)/);
   assert.match(app, /loadOptionalJson\s*\(\s*`\.\/data\/counties\/by-city\/\$\{cityId\}\.json`/);
   assert.match(app, /loadOptionalJson\s*\(\s*`\.\/data\/food-articles\/by-city\/\$\{cityId\}\.json`/);
+});
+
+test("app wires deferred recovery, merge precedence, retryability and readiness policies", async () => {
+  const app = await readFile(appUrl, "utf8");
+  const prepareMigration = functionSource(app, "prepareTripMigration");
+  const restore = functionSource(app, "restoreTripState");
+  const hydrate = functionSource(app, "hydrateDeferredSummaries");
+  const ensureCounties = functionSource(app, "ensureCityCounties");
+  const ensureFood = functionSource(app, "ensureCityFoodArticles");
+  const hydrateFood = functionSource(app, "hydrateFoodArticles");
+  const commit = functionSource(app, "commitTripPlan");
+  const init = functionSource(app, "initApp");
+  const idleCallback = arrowCallCallbackSource(init, "scheduleIdle");
+
+  assert.match(prepareMigration, /prepareLegacyRecoveryData\s*\(/);
+  assert.doesNotMatch(prepareMigration, /placeById\s*\(/);
+  assert.match(restore, /selectTripRecoveryCandidate\s*\(/);
+  assert.match(restore, /status\s*===\s*["']deferred["']/);
+  assert.ok(
+    restore.indexOf("selectTripRecoveryCandidate(") < restore.indexOf("backupLegacyTripRaw("),
+    "candidate validation must precede legacy backup"
+  );
+  assert.match(init, /initialRecovery\.status\s*===\s*["']deferred["']/);
+  assert.doesNotMatch(init, /shouldRetryTripRestoreAfterCountyHydration\s*=\s*!state\.tripPlan/);
+
+  assert.match(hydrate, /classifyDeferredSummaryData\s*\(/);
+  assert.match(hydrate, /hydrateFoodArticles\s*\(\s*foodData\s*\)/);
+  assert.match(hydrateFood, /incomingSource:\s*["']summary["']/);
+  assert.match(hydrate, /status\.countyValid/);
+  assert.match(hydrate, /status\.foodValid/);
+  assert.match(commit, /shouldRetryTripRestoreAfterCountyHydration\s*=\s*false/);
+
+  assert.match(ensureCounties, /if\s*\(\s*!isCountyRecordsPayload\s*\(\s*data\s*\)\s*\)\s*return\s+citySubareas/);
+  assert.ok(
+    ensureCounties.indexOf("isCountyRecordsPayload(data)") < ensureCounties.indexOf("loadedCountyCityIds.add"),
+    "county payload validation must precede the loaded marker"
+  );
+  assert.match(ensureCounties, /finally\s*\([\s\S]*?countyLoadPromises\.delete/);
+
+  assert.match(ensureFood, /if\s*\(\s*!isFoodArticlesPayload\s*\(\s*data\s*\)\s*\)\s*return\s+articlesForCity/);
+  assert.match(ensureFood, /incomingSource:\s*["']city["']/);
+  assert.ok(
+    ensureFood.indexOf("isFoodArticlesPayload(data)") < ensureFood.indexOf("loadedFoodArticleCityIds.add"),
+    "food payload validation must precede the loaded marker"
+  );
+  assert.match(ensureFood, /finally\s*\([\s\S]*?foodArticleLoadPromises\.delete/);
+
+  assert.match(idleCallback, /applyDeferredReadiness\s*\(/);
+  assert.match(idleCallback, /catch\s*\([\s\S]*?applyDeferredInternalFailure/);
+  assert.doesNotMatch(idleCallback, /finally\s*\(/);
+  assert.match(app, /dataset\.missingDatasets/);
+  assert.match(app, /dataset\.appReady\s*=\s*status\.readiness/);
+  assert.match(app, /function\s+renderOperationalWarnings\s*\(/);
+  assert.doesNotMatch(app, /function\s+showBoundaryLoadHint\s*\(/);
 });
 
 test("lightweight prefecture boundaries retain every city within the startup budget", async () => {
@@ -347,6 +463,8 @@ test("app builds one TripPlan v2 guide model and wires both guide renderers", as
 
 test("app wires v2 writes, recovery and legacy lifecycle through archive transactions", async () => {
   const app = await readFile(appUrl, "utf8");
+  const restore = functionSource(app, "restoreTripState");
+  const importTrip = functionSource(app, "importTripFile");
 
   assert.match(app, /const\s+tripArchiveStorage\s*=\s*createLazyStorageAdapter\s*\(\s*\(\)\s*=>\s*window\.localStorage\s*\)/);
   assert.doesNotMatch(app, /storage:\s*window\.localStorage/);
@@ -357,14 +475,10 @@ test("app wires v2 writes, recovery and legacy lifecycle through archive transac
   assert.match(app, /clearTripArchive\s*\(\s*\{[\s\S]*?storage:\s*tripArchiveStorage/);
   assert.match(app, /restoreTripArchiveSnapshot\s*\(/);
   assert.match(app, /completeLegacyMigration:\s*false/);
-  assert.match(
-    app,
-    /function\s+restoreTripState\s*\([^)]*\)\s*\{[\s\S]*?backupLegacyTripRaw\s*\([\s\S]*?migrateTripState\s*\([\s\S]*?commitTripPlan\s*\(\s*plan\s*,\s*\{[\s\S]*?recordHistory:\s*false[\s\S]*?completeLegacyMigration:\s*false/
-  );
-  assert.match(
-    app,
-    /async\s+function\s+importTripFile\s*\([^)]*\)\s*\{[\s\S]*?file\.text\s*\(\s*\)[\s\S]*?backupLegacyTripRaw\s*\([\s\S]*?migrateTripState\s*\([\s\S]*?commitTripPlan\s*\(\s*plan\s*,\s*\{[\s\S]*?completeLegacyMigration:\s*false[\s\S]*?finally\s*\{[\s\S]*?input\.value\s*=\s*["']["']/
-  );
+  assert.ok(restore.indexOf("migrateTripState(") < restore.indexOf("backupLegacyTripRaw("));
+  assert.match(restore, /commitTripPlan\s*\(\s*plan\s*,\s*\{[\s\S]*?recordHistory:\s*false[\s\S]*?completeLegacyMigration:\s*false/);
+  assert.ok(importTrip.indexOf("migrateTripState(") < importTrip.indexOf("backupLegacyTripRaw("));
+  assert.match(importTrip, /commitTripPlan\s*\(\s*plan\s*,\s*\{[\s\S]*?completeLegacyMigration:\s*false[\s\S]*?finally\s*\{[\s\S]*?input\.value\s*=\s*["']["']/);
   assert.match(app, /旧版存档备份失败[\s\S]*?rememberEmergencyLegacyTrip\s*\(\s*candidate\.raw\s*\)/);
   assert.match(app, /failureReason\s*=\s*["']backup["'][\s\S]*?rememberEmergencyLegacyTrip\s*\(\s*rawText\s*\)/);
   assert.match(app, /请保持页面打开，并在浏览器设置中检查本站点数据权限后重试/);
