@@ -58,10 +58,17 @@ import {
   mergeProgressiveFoodArticles,
   scheduleIdle
 } from "./app-data.js";
+import {
+  createPlaceIndex,
+  hydrateCountySummary as mergeCountyRecords,
+  normalizeKey,
+  normalizeSearchText
+} from "./place-index.js";
 
 const tripArchiveStorage = createLazyStorageAdapter(() => window.localStorage);
 const { loadJson, loadOptionalJson } = createJsonLoader();
 const deferredData = createDeferredDataLoaders({ loadOptionalJson });
+let placeIndex = null;
 
 const labels = {
   chooseStart: "\u9009\u62e9\u51fa\u53d1\u57ce\u5e02",
@@ -612,24 +619,23 @@ async function loadMapData() {
   state.hiddenMunicipalityChildren = cities.filter((city) => municipalityNames.has(city.province) && city.name !== city.province);
   state.mapData = criticalData.mapData;
   state.failedBoundaryPaths = criticalData.failedBoundaryPaths;
-  state.cities = displayCities.map((city) => ({
-    ...city,
-    searchText: normalizeSearchText(`${city.name} ${city.province} ${city.pinyin}`)
-  }));
-  state.counties = buildMunicipalityCountyEntries(
-    state.hiddenMunicipalityChildren,
-    state.cities
-  ).map(normalizeCountyRecord);
-  rebuildPlaceIndexes();
+  placeIndex = createPlaceIndex({
+    cities: displayCities,
+    counties: [],
+    municipalityChildren: state.hiddenMunicipalityChildren
+  });
+  syncPlaceIndex();
   hydrateFoodArticles(null);
 }
 
-function rebuildPlaceIndexes() {
-  state.cityById = new Map(state.cities.map((city) => [city.id, city]));
-  state.placeById = buildPlaceMap(state.cities, state.counties);
-  state.cityByKey = buildCityKeyMap(state.cities, state.hiddenMunicipalityChildren);
-  state.cityByProvinceKey = buildCityProvinceKeyMap(state.cities, state.hiddenMunicipalityChildren);
-  state.cityKeyEntries = Array.from(state.cityByKey.entries()).sort((a, b) => b[0].length - a[0].length);
+function syncPlaceIndex() {
+  state.cities = placeIndex.cities;
+  state.counties = placeIndex.counties;
+  state.cityById = placeIndex.cityById;
+  state.placeById = placeIndex.placeById;
+  state.cityByKey = placeIndex.cityByKey;
+  state.cityByProvinceKey = placeIndex.cityByProvinceKey;
+  state.cityKeyEntries = placeIndex.cityKeyEntries;
 }
 
 async function hydrateDeferredSummaries() {
@@ -643,8 +649,8 @@ async function hydrateDeferredSummaries() {
   state.deferredInternalError = false;
 
   if (status.countyValid) {
-    mergeCountyRecords(countyData.counties);
-    rebuildPlaceIndexes();
+    mergeCountyRecords(placeIndex, countyData.counties);
+    syncPlaceIndex();
     if (shouldRetryTripRestoreAfterCountyHydration) {
       shouldRetryTripRestoreAfterCountyHydration = false;
       restoreTripState();
@@ -727,55 +733,6 @@ function enrichPlaceSearchTextWithArticles() {
   state.counties.forEach(appendArticleText);
 }
 
-function buildMunicipalityCountyEntries(children, displayCities) {
-  const municipalityByName = new Map(displayCities.filter((city) => municipalityNames.has(city.name)).map((city) => [city.name, city]));
-  return children.flatMap((child) => {
-    const parent = municipalityByName.get(child.province);
-    if (!parent) return [];
-    return [{
-      id: `${parent.id}-${child.pinyin}`,
-      name: child.name,
-      pinyin: child.pinyin,
-      code: child.code || "",
-      lon: child.lon,
-      lat: child.lat,
-      province: child.province,
-      parentCityId: parent.id,
-      parentCityName: parent.name,
-      parentCityPinyin: parent.pinyin
-    }];
-  });
-}
-
-function buildPlaceMap(cities, counties) {
-  const map = new Map();
-  cities.forEach((city) => map.set(city.id, { ...city, placeType: "city" }));
-  counties.forEach((county) => map.set(county.id, { ...county, placeType: "county" }));
-  return map;
-}
-
-function normalizeCountyRecord(county) {
-  return {
-    ...county,
-    placeType: "county",
-    searchType: "county",
-    searchText: county.searchText || normalizeSearchText(`${county.name} ${county.province} ${county.pinyin} ${county.parentCityName} ${county.parentCityPinyin}`)
-  };
-}
-
-function mergeCountyRecords(counties) {
-  if (!Array.isArray(counties) || !counties.length) return [];
-  const byId = new Map(state.counties.map((county) => [county.id, county]));
-  const merged = counties.map((county) => {
-    const record = normalizeCountyRecord({ ...(byId.get(county.id) || {}), ...county });
-    byId.set(record.id, record);
-    state.placeById.set(record.id, record);
-    return record;
-  });
-  state.counties = Array.from(byId.values());
-  return merged;
-}
-
 function initMap() {
   if (!window.L) throw new Error("Leaflet renderer did not load");
 
@@ -838,75 +795,6 @@ function renderChinaLayer() {
       });
     }
   }).addTo(state.map);
-}
-
-function normalizeKey(value) {
-  return String(value || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/[^a-z0-9]/g, "")
-    .replace(/meng$/g, "")
-    .replace(/diqu$/g, "")
-    .replace(/zhou$/g, "");
-}
-
-function normalizeSearchText(value) {
-  return String(value || "")
-    .toLowerCase()
-    .normalize("NFD")
-    .replace(/[\u0300-\u036f]/g, "")
-    .replace(/\s+/g, "");
-}
-
-function buildCityKeyMap(cities, municipalityChildren = []) {
-  const aliases = new Map([
-    ["enshi", "enshi"],
-    ["linzhi", "linzhi"],
-    ["luliang", "lvliang"],
-    ["lvliang", "lvliang"],
-    ["kezilesukeerkezi", "kezhou"]
-  ]);
-  const map = new Map();
-  cities.forEach((city) => {
-    const key = normalizeKey(city.pinyin);
-    map.set(key, city);
-    map.set(normalizeKey(city.name), city);
-  });
-  municipalityChildren.forEach((child) => {
-    const parent = cities.find((city) => city.name === child.province);
-    if (!parent) return;
-    map.set(normalizeKey(child.pinyin), parent);
-    map.set(normalizeKey(child.name), parent);
-  });
-  aliases.forEach((cityKey, featureKey) => {
-    const city = map.get(normalizeKey(cityKey));
-    if (city) map.set(normalizeKey(featureKey), city);
-  });
-  return map;
-}
-
-function buildCityProvinceKeyMap(cities, municipalityChildren = []) {
-  const map = new Map();
-  const setCity = (city, province, keyValue) => {
-    const key = normalizeKey(keyValue);
-    if (!province || !key) return;
-    map.set(`${province}|${key}`, city);
-  };
-
-  cities.forEach((city) => {
-    setCity(city, city.province, city.pinyin);
-    setCity(city, city.province, city.name);
-  });
-
-  municipalityChildren.forEach((child) => {
-    const parent = cities.find((city) => city.name === child.province);
-    if (!parent) return;
-    setCity(parent, child.province, child.pinyin);
-    setCity(parent, child.province, child.name);
-  });
-
-  return map;
 }
 
 function matchFeatureToCity(feature) {
@@ -3660,7 +3548,8 @@ async function ensureCityCounties(cityId) {
     .then((data) => {
       if (!isCountyRecordsPayload(data)) return citySubareas(cityById(cityId));
       const counties = data.counties;
-      mergeCountyRecords(counties);
+      mergeCountyRecords(placeIndex, counties);
+      syncPlaceIndex();
       state.loadedCountyCityIds.add(cityId);
       return counties;
     })
