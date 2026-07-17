@@ -14,6 +14,13 @@ test("Leaflet ownership lives in the public map-core module", async () => {
   assert.equal(typeof mapCore.createMapController, "function");
   assert.doesNotMatch(appSource, /\bL\.(?:map|geoJSON)\s*\(/);
   assert.doesNotMatch(appSource, /\bL\./, "app.js must not directly own Leaflet rendering");
+  assert.doesNotMatch(
+    appSource,
+    /mapController\.(?:addGeoJson|addMarker|addPolyline|addCircleMarker|divIcon|fitBounds|createBounds|getZoom|flyTo)\s*\(/,
+    "app.js must use cohesive map operations, not Leaflet forwarding methods"
+  );
+  assert.doesNotMatch(appSource, /state\.cityDetailLayer\b|\.addTo\s*\(/, "app.js must not attach or clear map layers");
+  assert.match(appSource, /mapController\.renderCityDetail\s*\(/);
   assert.match(appSource, /createMapController\s*\(\s*\{[\s\S]*?L:\s*window\.L[\s\S]*?state,[\s\S]*?callbacks:[\s\S]*?helpers:/);
   assert.doesNotMatch(
     appSource,
@@ -21,9 +28,119 @@ test("Leaflet ownership lives in the public map-core module", async () => {
   );
   assert.doesNotMatch(mapCoreSource, /(?:from|import\s*)["']\.\/app\.js["']/);
   assert.doesNotMatch(mapCoreSource, /\b(?:window|document)\b/, "map-core must use injected dependencies");
+  assert.doesNotMatch(
+    mapCoreSource,
+    /function\s+(?:addGeoJson|addMarker|addPolyline|addCircleMarker|divIcon|fitBounds|createBounds|getZoom|flyTo)\s*\(/,
+    "map-core must not expose generic Leaflet forwarding functions"
+  );
   for (const method of ["init", "fitChina", "renderRoutes", "updateCityStyles", "enterChinaView", "setMobileView", "destroy"]) {
     assert.match(mapCoreSource, new RegExp(`\\b${method}\\b`), `expected controller API to include ${method}`);
   }
+});
+
+test("map controller owns cohesive city-detail rendering and lifecycle", async () => {
+  const { createMapController } = await import(mapCoreUrl);
+  const calls = [];
+  const attached = new Set();
+  const events = [];
+  const bounds = {
+    extend(value) { calls.push(["bounds.extend", value]); return this; },
+    isValid() { return true; },
+    pad() { return this; }
+  };
+  const makeLayer = (kind) => ({
+    feature: null,
+    addTo() { calls.push([`${kind}.addTo`]); return this; },
+    bindTooltip(text) { calls.push([`${kind}.tooltip`, text]); return this; },
+    bindPopup(text) { calls.push([`${kind}.popup`, text]); return this; },
+    on(nameOrEvents, handler) { events.push([nameOrEvents, handler]); return this; },
+    setStyle(style) { calls.push([`${kind}.style`, style]); return this; },
+    getBounds() { return bounds; },
+    clearLayers() { calls.push([`${kind}.clear`]); }
+  });
+  const detailLayer = makeLayer("detail");
+  const routeLayer = makeLayer("routes");
+  const cityLayer = makeLayer("cities");
+  const labelLayer = makeLayer("labels");
+  const chinaLayer = makeLayer("china");
+  const map = {
+    hasLayer(layer) { return attached.has(layer); },
+    removeLayer(layer) { attached.delete(layer); calls.push(["map.removeLayer", layer]); },
+    fitBounds() { calls.push(["map.fitBounds"]); },
+    getBounds() { return { pad() { return this; }, contains() { return true; } }; },
+    getZoom() { return 8; },
+    off() {},
+    remove() { calls.push(["map.remove"]); }
+  };
+  for (const layer of [chinaLayer, cityLayer, labelLayer]) attached.add(layer);
+  for (const layer of [routeLayer, detailLayer]) {
+    layer.addTo = () => { attached.add(layer); calls.push(["layer.addTo", layer]); return layer; };
+  }
+  const L = {
+    latLngBounds() { calls.push(["latLngBounds"]); return bounds; },
+    geoJSON(data, options) {
+      calls.push(["geoJSON"]);
+      if (options?.onEachFeature && data.features?.[0]) options.onEachFeature(data.features[0], makeLayer("district"));
+      return makeLayer("geoJSON");
+    },
+    marker() { calls.push(["marker"]); return makeLayer("marker"); },
+    circleMarker() { calls.push(["circleMarker"]); return makeLayer("circleMarker"); },
+    polyline() { calls.push(["polyline"]); return makeLayer("polyline"); },
+    divIcon(options) { calls.push(["divIcon", options]); return options; }
+  };
+  const cityMarker = makeLayer("cityMarker");
+  const state = {
+    map,
+    canvasRenderer: {},
+    cities: [{ id: "city", marker: cityMarker }],
+    routes: [],
+    selectedCityId: "city",
+    cityDetailLayer: detailLayer,
+    routeLayer,
+    cityLayer,
+    labelLayer,
+    chinaLayer,
+    viewMode: "city",
+    activeCityViewId: "city",
+    cityById: new Map([["city", { id: "city" }]]),
+    placeById: new Map()
+  };
+  const controller = createMapController({
+    L,
+    state,
+    callbacks: { queuePlaceClick(id) { calls.push(["place.click", id]); } },
+    helpers: { articleCountForCity: () => 0 }
+  });
+
+  controller.enterCityView();
+  controller.renderCityDetail({
+    city: { id: "city", name: "测试城" },
+    sourceFeature: { type: "Feature", properties: {} },
+    districts: [{ feature: { type: "Feature", properties: {} }, name: "一区", placeId: "district", labelPoint: { lat: 1, lon: 2 } }],
+    subareas: [{ id: "subarea", name: "二区", lat: 3, lon: 4 }],
+    landmarks: [{ name: "景点", lat: 5, lon: 6, type: "scenic", symbol: "景", typeLabel: "景点", popupHtml: "landmark popup" }],
+    stations: [{ name: "火车站", lat: 7, lon: 8 }],
+    metroLines: [{ name: "1号线", color: "#123456", coordinates: [[9, 10], [11, 12]] }],
+    subwayStations: [{ name: "地铁站", lat: 13, lon: 14, color: "#654321", source: "metro-network", lineName: "1号线" }],
+    foodMarkers: [{ title: "美食", lat: 15, lon: 16, popupHtml: "food popup" }]
+  });
+  events.find(([eventMap]) => eventMap && typeof eventMap === "object")?.[0].click();
+  controller.updateCityStyles();
+  controller.clearCityDetail();
+  controller.enterChinaView();
+  controller.destroy();
+
+  assert.ok(calls.filter(([name]) => name === "geoJSON").length >= 1);
+  assert.ok(calls.filter(([name]) => name === "marker").length >= 4, "expected landmark, station, food, and labels");
+  assert.ok(calls.filter(([name]) => name === "circleMarker").length >= 1);
+  assert.equal(calls.filter(([name]) => name === "polyline").length, 2);
+  assert.ok(calls.some(([name]) => name === "map.fitBounds"));
+  assert.ok(calls.some(([name]) => name === "detail.clear"));
+  assert.ok(calls.some(([name]) => name === "cityMarker.style"));
+  assert.ok(calls.some(([name]) => name === "china.style"));
+  assert.ok(calls.some(([name]) => name === "map.removeLayer"));
+  assert.ok(calls.some(([name]) => name === "map.remove"));
+  assert.ok(calls.some(([name, id]) => name === "place.click" && id === "district"));
 });
 
 test("map controller initializes Leaflet layers and renders routes through injected state", async () => {

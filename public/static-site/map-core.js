@@ -285,6 +285,275 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
     if (state.cityDetailLayer && !state.map.hasLayer(state.cityDetailLayer)) state.cityDetailLayer.addTo(state.map);
   }
 
+  function districtBoundaryStyle(feature) {
+    const index = feature?.properties ? Number(feature.properties.subFeatureIndex || 0) : 0;
+    const fills = ["#dfe9d7", "#e9f1dd", "#d7e8dc", "#edf0d8", "#dbeade"];
+    return {
+      color: "#6f8c73",
+      weight: 1.05,
+      fillColor: fills[index % fills.length],
+      fillOpacity: 0.86,
+      opacity: 0.96
+    };
+  }
+
+  function metroColor(color) {
+    const text = String(color || "").replace(/^#/, "").trim();
+    return /^[0-9a-f]{6}$/i.test(text) ? `#${text}` : "#0f8f83";
+  }
+
+  function addDetailLabel(detailBounds, { name, lat, lon, className, fontSize }) {
+    detailBounds.extend([lat, lon]);
+    L.marker([lat, lon], {
+      interactive: false,
+      keyboard: false,
+      icon: L.divIcon({
+        className,
+        html: `<span style="font-size:${fontSize}px">${escapeHtml(name)}</span>`,
+        iconSize: null,
+        iconAnchor: [0, 0]
+      })
+    }).addTo(state.cityDetailLayer);
+  }
+
+  function clearCityDetail() {
+    state.cityDetailLayer?.clearLayers();
+  }
+
+  function renderCityDetail({
+    city,
+    sourceFeature = null,
+    districts = [],
+    subareas = [],
+    landmarks = [],
+    stations = [],
+    metroLines = [],
+    subwayStations = [],
+    foodMarkers = [],
+    foodArticleCount = foodMarkers.length
+  } = {}) {
+    if (!city || !state.map || !state.cityDetailLayer) return;
+    clearCityDetail();
+    const detailBounds = L.latLngBounds([]);
+
+    state.activeDistrictBoundaryCount = districts.length;
+    state.activeLandmarkCount = landmarks.length;
+    state.activeStationCount = stations.length;
+    state.activeSubwayLineCount = metroLines.length;
+    state.activeSubwayStationCount = subwayStations.length;
+    state.activeFoodArticleCount = foodArticleCount;
+
+    if (!districts.length && sourceFeature) {
+      const outline = L.geoJSON(sourceFeature, {
+        renderer: state.canvasRenderer,
+        interactive: false,
+        style: () => ({
+          color: "#234f44",
+          weight: 1.8,
+          fillColor: "#e7efdf",
+          fillOpacity: 0.78,
+          opacity: 1
+        })
+      }).addTo(state.cityDetailLayer);
+      detailBounds.extend(outline.getBounds());
+    }
+
+    if (districts.length) {
+      const districtByFeature = new Map(districts.map((district) => [district.feature, district]));
+      const districtLayer = L.geoJSON({
+        type: "FeatureCollection",
+        features: districts.map((district) => district.feature)
+      }, {
+        renderer: state.canvasRenderer,
+        interactive: true,
+        style: districtBoundaryStyle,
+        onEachFeature: (feature, layer) => {
+          const district = districtByFeature.get(feature) || {};
+          const name = district.name || feature.properties?.name || "下辖区域";
+          layer.bindTooltip(`${name} / ${city.name}`, {
+            className: "city-tooltip",
+            direction: "center",
+            opacity: 0.96,
+            sticky: true
+          });
+          layer.on({
+            click: () => district.placeId && callbacks.queuePlaceClick?.(district.placeId),
+            mouseover: () => layer.setStyle({ fillOpacity: 0.96, weight: 1.6, color: "#234f44" }),
+            mouseout: () => layer.setStyle(districtBoundaryStyle(feature))
+          });
+          if (district.labelPoint) {
+            addDetailLabel(detailBounds, {
+              name,
+              lat: district.labelPoint.lat,
+              lon: district.labelPoint.lon,
+              className: "city-detail-label",
+              fontSize: 12
+            });
+          }
+        }
+      }).addTo(state.cityDetailLayer);
+      detailBounds.extend(districtLayer.getBounds());
+    } else {
+      subareas.forEach((area) => {
+        detailBounds.extend([area.lat, area.lon]);
+        L.circleMarker([area.lat, area.lon], {
+          renderer: state.canvasRenderer,
+          radius: 4.5,
+          color: "#fffaf0",
+          weight: 1.4,
+          fillColor: "#168f7d",
+          fillOpacity: 0.95,
+          interactive: true
+        })
+          .bindTooltip(`${area.name} / ${city.name}`, {
+            className: "city-tooltip",
+            direction: "top",
+            offset: [0, -8],
+            opacity: 1,
+            sticky: true
+          })
+          .on("click", () => callbacks.queuePlaceClick?.(area.id))
+          .addTo(state.cityDetailLayer);
+        addDetailLabel(detailBounds, { name: area.name, lat: area.lat, lon: area.lon, className: "city-detail-label", fontSize: 12 });
+      });
+    }
+
+    landmarks.forEach((landmark) => {
+      detailBounds.extend([landmark.lat, landmark.lon]);
+      L.marker([landmark.lat, landmark.lon], {
+        icon: L.divIcon({
+          className: "",
+          html: `<span class="landmark-marker ${escapeHtml(landmark.type || "scenic")}"><span>${landmark.symbol}</span></span>`,
+          iconSize: [18, 18],
+          iconAnchor: [9, 9]
+        })
+      })
+        .bindTooltip(`${landmark.name} / ${landmark.typeLabel}`, {
+          className: "city-tooltip",
+          direction: "top",
+          offset: [0, -8],
+          opacity: 1,
+          sticky: true
+        })
+        .bindPopup(landmark.popupHtml, {
+          className: "landmark-popup-shell",
+          maxWidth: 280,
+          minWidth: 220
+        })
+        .addTo(state.cityDetailLayer);
+      addDetailLabel(detailBounds, { name: landmark.name, lat: landmark.lat, lon: landmark.lon, className: "landmark-label", fontSize: 13 });
+    });
+
+    stations.forEach((station) => {
+      detailBounds.extend([station.lat, station.lon]);
+      L.marker([station.lat, station.lon], {
+        icon: L.divIcon({
+          className: "",
+          html: `<span class="station-marker"><span>火</span></span>`,
+          iconSize: [20, 20],
+          iconAnchor: [10, 10]
+        })
+      })
+        .bindTooltip(`${station.name} / 火车站`, {
+          className: "city-tooltip",
+          direction: "top",
+          offset: [0, -8],
+          opacity: 1,
+          sticky: true
+        })
+        .addTo(state.cityDetailLayer);
+      addDetailLabel(detailBounds, { name: station.name, lat: station.lat, lon: station.lon, className: "station-label", fontSize: 13 });
+    });
+
+    metroLines.forEach((line) => {
+      const points = (line.coordinates || [])
+        .map((coord) => [Number(coord[1]), Number(coord[0])])
+        .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
+      if (points.length < 2) return;
+      points.forEach((point) => detailBounds.extend(point));
+      L.polyline(points, {
+        renderer: state.canvasRenderer,
+        color: "#fffaf0",
+        weight: 7,
+        opacity: 0.74,
+        interactive: false,
+        lineCap: "round",
+        lineJoin: "round"
+      }).addTo(state.cityDetailLayer);
+      L.polyline(points, {
+        renderer: state.canvasRenderer,
+        color: metroColor(line.color),
+        weight: 4,
+        opacity: 0.92,
+        interactive: true,
+        lineCap: "round",
+        lineJoin: "round"
+      })
+        .bindTooltip(`${line.name} / 地铁线路`, {
+          className: "city-tooltip",
+          direction: "top",
+          opacity: 1,
+          sticky: true
+        })
+        .addTo(state.cityDetailLayer);
+    });
+
+    subwayStations.forEach((station) => {
+      detailBounds.extend([station.lat, station.lon]);
+      L.circleMarker([station.lat, station.lon], {
+        renderer: state.canvasRenderer,
+        radius: station.source === "metro-network" ? 3.4 : 4.4,
+        color: "#fffaf0",
+        weight: 1,
+        fillColor: metroColor(station.color),
+        fillOpacity: 0.96,
+        opacity: 1
+      })
+        .bindTooltip(`${station.name} / ${station.lineName ? `${station.lineName} ` : ""}地铁站`, {
+          className: "city-tooltip",
+          direction: "top",
+          offset: [0, -8],
+          opacity: 1,
+          sticky: true
+        })
+        .addTo(state.cityDetailLayer);
+    });
+
+    foodMarkers.forEach((food) => {
+      detailBounds.extend([food.lat, food.lon]);
+      L.marker([food.lat, food.lon], {
+        pane: "foodMarkers",
+        icon: L.divIcon({
+          className: "",
+          html: `<span class="food-marker"><span>食</span></span>`,
+          iconSize: [22, 22],
+          iconAnchor: [11, 11]
+        })
+      })
+        .bindTooltip(`${food.title} / 食行记`, {
+          className: "city-tooltip",
+          direction: "top",
+          offset: [0, -8],
+          opacity: 1,
+          sticky: true
+        })
+        .bindPopup(food.popupHtml, {
+          className: "food-popup-shell",
+          maxWidth: 320,
+          minWidth: 250
+        })
+        .addTo(state.cityDetailLayer);
+    });
+
+    if (!detailBounds.isValid()) return;
+    state.map.fitBounds(detailBounds.pad(0.18), {
+      paddingTopLeft: [28, 28],
+      paddingBottomRight: [28, 28],
+      animate: true,
+      duration: 0.35
+    });
+  }
+
   function enterChinaView(options = {}) {
     if (!state.map) return;
     callbacks.cancelQueuedCityClick?.();
@@ -295,7 +564,7 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
     state.activeStationCount = 0;
     state.activeSubwayLineCount = 0;
     state.activeSubwayStationCount = 0;
-    state.cityDetailLayer?.clearLayers();
+    clearCityDetail();
     [state.chinaLayer, state.routeLayer, state.cityLayer, state.labelLayer].forEach((layer) => {
       if (layer && !state.map.hasLayer(layer)) layer.addTo(state.map);
     });
@@ -361,16 +630,15 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
     });
   }
 
-  function createBounds(points = []) { return L.latLngBounds(points); }
   function distanceBetween(from, to) { return haversineDistance(from, to); }
-  function addGeoJson(data, options = {}) { return L.geoJSON(data, options); }
-  function addCircleMarker(point, options = {}) { return L.circleMarker(point, options); }
-  function addMarker(point, options = {}) { return L.marker(point, options); }
-  function divIcon(options = {}) { return L.divIcon(options); }
-  function addPolyline(points, options = {}) { return L.polyline(points, options); }
-  function getZoom() { return state.map?.getZoom(); }
-  function flyTo(point, zoom, options = {}) { return state.map?.flyTo(point, zoom, options); }
-  function fitBounds(bounds, options = {}) { return state.map?.fitBounds(bounds, options); }
+  function focusPlace(place, { minimumZoom = 10, duration = 0.45 } = {}) {
+    if (!state.map || !hasCoordinates(place)) return;
+    state.map.flyTo(
+      [Number(place.lat), Number(place.lon)],
+      Math.max(state.map.getZoom(), minimumZoom),
+      { duration }
+    );
+  }
 
   function destroy() {
     if (!state.map) return;
@@ -393,19 +661,13 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
     updateCityStyles,
     enterCityView,
     enterChinaView,
+    renderCityDetail,
+    clearCityDetail,
     setMobileView,
     calculateRouteMetrics,
     recalculateRoutesForTransport,
     distanceBetween,
-    createBounds,
-    addGeoJson,
-    addCircleMarker,
-    addMarker,
-    divIcon,
-    addPolyline,
-    getZoom,
-    flyTo,
-    fitBounds,
+    focusPlace,
     destroy
   };
 }

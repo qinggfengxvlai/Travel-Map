@@ -480,7 +480,6 @@ const state = {
   cityLayer: null,
   labelLayer: null,
   routeLayer: null,
-  cityDetailLayer: null,
   cityById: new Map(),
   placeById: new Map(),
   cityByKey: new Map(),
@@ -784,12 +783,12 @@ async function selectSearchResult(item) {
       await enterCityView(targetCity.id);
     }
     if (hasCoordinates(county)) {
-      mapController.flyTo([county.lat, county.lon], Math.max(mapController.getZoom(), 10), { duration: 0.45 });
+      mapController.focusPlace(county);
     }
     handlePlaceClick(county.id);
   } else {
     if (state.viewMode === "city") exitCityView({ fit: false });
-    mapController.flyTo([item.lat, item.lon], Math.max(mapController.getZoom(), 10), { duration: 0.45 });
+    mapController.focusPlace(item);
     handlePlaceClick(targetCity.id);
   }
   citySearch.value = "";
@@ -880,7 +879,7 @@ async function resetMapView() {
   if (state.viewMode === "city") {
     const activeCity = cityById(state.activeCityViewId);
     if (activeCity) {
-      await renderCityDetail(activeCity);
+      await loadCityDetail(activeCity);
       renderPanel();
     }
     return;
@@ -2336,14 +2335,14 @@ function cancelQueuedCityClick() {
 
 async function enterCityView(cityId) {
   const city = cityById(cityId);
-  if (!city || !state.map || !state.cityDetailLayer) return;
+  if (!city || !state.map || !mapController) return;
 
   cancelQueuedCityClick();
   state.viewMode = "city";
   state.activeCityViewId = city.id;
 
   mapController.enterCityView();
-  await renderCityDetail(city);
+  await loadCityDetail(city);
   exitCityViewBtn.hidden = false;
   renderPanel();
 }
@@ -2352,9 +2351,8 @@ function exitCityView(options = {}) {
   mapController?.enterChinaView(options);
 }
 
-async function renderCityDetail(city) {
-  state.cityDetailLayer.clearLayers();
-  const detailBounds = mapController.createBounds([]);
+async function loadCityDetail(city) {
+  mapController.clearCityDetail();
   await Promise.all([
     ensureCityCounties(city.id),
     ensureCityFoodArticles(city.id)
@@ -2365,179 +2363,45 @@ async function renderCityDetail(city) {
   const subareas = citySubareas(city);
   const districtData = await fetchCityDistrictBoundaries(city);
   if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
-  state.activeDistrictBoundaryCount = districtData && Array.isArray(districtData.features) ? districtData.features.length : 0;
-
-  if (!state.activeDistrictBoundaryCount && sourceLayer && sourceLayer.feature) {
-    const outline = mapController.addGeoJson(sourceLayer.feature, {
-      renderer: state.canvasRenderer,
-      interactive: false,
-      style: () => ({
-        color: "#234f44",
-        weight: 1.8,
-        fillColor: "#e7efdf",
-        fillOpacity: 0.78,
-        opacity: 1
+  const districts = Array.isArray(districtData?.features)
+    ? districtData.features.map((feature) => {
+        const place = districtPlaceFromFeature(city, feature);
+        return {
+          feature,
+          name: feature.properties?.name || "\u4e0b\u8f96\u533a\u57df",
+          placeId: place?.id || null,
+          labelPoint: districtLabelPoint(feature)
+        };
       })
-    }).addTo(state.cityDetailLayer);
-    detailBounds.extend(outline.getBounds());
-  }
-
-  if (districtData && Array.isArray(districtData.features) && districtData.features.length) {
-    const districtLayer = mapController.addGeoJson(districtData, {
-      renderer: state.canvasRenderer,
-      interactive: true,
-      style: districtBoundaryStyle,
-      onEachFeature: (feature, layer) => {
-        const name = feature.properties && feature.properties.name ? feature.properties.name : "\u4e0b\u8f96\u533a\u57df";
-        const districtPlace = districtPlaceFromFeature(city, feature);
-        layer.bindTooltip(`${name} / ${city.name}`, {
-          className: "city-tooltip",
-          direction: "center",
-          opacity: 0.96,
-          sticky: true
-        });
-        layer.on({
-          click: () => districtPlace && queuePlaceClick(districtPlace.id),
-          mouseover: () => layer.setStyle({ fillOpacity: 0.96, weight: 1.6, color: "#234f44" }),
-          mouseout: () => layer.setStyle(districtBoundaryStyle(feature))
-        });
-        const labelPoint = districtLabelPoint(feature);
-        if (labelPoint) addDetailLabel(name, labelPoint.lat, labelPoint.lon, "city-detail-label", 12);
-      }
-    }).addTo(state.cityDetailLayer);
-    detailBounds.extend(districtLayer.getBounds());
-  } else {
-    subareas.forEach((area) => {
-      detailBounds.extend([area.lat, area.lon]);
-      mapController.addCircleMarker([area.lat, area.lon], {
-        renderer: state.canvasRenderer,
-        radius: 4.5,
-        color: "#fffaf0",
-        weight: 1.4,
-        fillColor: "#168f7d",
-        fillOpacity: 0.95,
-        interactive: true
-      })
-        .bindTooltip(`${area.name} / ${city.name}`, {
-          className: "city-tooltip",
-          direction: "top",
-          offset: [0, -8],
-          opacity: 1,
-          sticky: true
-        })
-        .on("click", () => queuePlaceClick(area.id))
-        .addTo(state.cityDetailLayer);
-      addDetailLabel(area.name, area.lat, area.lon, "city-detail-label", 12);
-    });
-  }
-
+    : [];
   const boundaryData = districtData || (sourceLayer && sourceLayer.feature);
-  const landmarks = await resolveCityLandmarks(city, detailBounds, boundaryData);
+  const queryBounds = cityDetailQueryBounds(boundaryData, districts.length ? [] : subareas);
+  const landmarks = await resolveCityLandmarks(city, queryBounds, boundaryData);
   if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
-  state.activeLandmarkCount = landmarks.length;
-
-  landmarks.forEach((landmark) => {
-    detailBounds.extend([landmark.lat, landmark.lon]);
-    mapController.addMarker([landmark.lat, landmark.lon], {
-      icon: mapController.divIcon({
-        className: "",
-        html: `<span class="landmark-marker ${escapeHtml(landmark.type || "scenic")}"><span>${landmarkSymbol(landmark.type)}</span></span>`,
-        iconSize: [18, 18],
-        iconAnchor: [9, 9]
-      })
-    })
-      .bindTooltip(`${landmark.name} / ${landmarkTypeLabel(landmark.type)}`, {
-        className: "city-tooltip",
-        direction: "top",
-        offset: [0, -8],
-        opacity: 1,
-        sticky: true
-      })
-      .bindPopup(landmarkPopupHtml(landmark, city), {
-        className: "landmark-popup-shell",
-        maxWidth: 280,
-        minWidth: 220
-      })
-      .addTo(state.cityDetailLayer);
-    addDetailLabel(landmark.name, landmark.lat, landmark.lon, "landmark-label", 13);
-  });
-
-  const stations = await resolveCityStations(city, detailBounds, boundaryData);
+  const stations = await resolveCityStations(city, queryBounds, boundaryData);
   if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
-  state.activeStationCount = stations.length;
-
-  stations.forEach((station) => {
-    detailBounds.extend([station.lat, station.lon]);
-    mapController.addMarker([station.lat, station.lon], {
-      icon: mapController.divIcon({
-        className: "",
-        html: `<span class="station-marker"><span>\u706b</span></span>`,
-        iconSize: [20, 20],
-        iconAnchor: [10, 10]
-      })
-    })
-      .bindTooltip(`${station.name} / \u706b\u8f66\u7ad9`, {
-        className: "city-tooltip",
-        direction: "top",
-        offset: [0, -8],
-        opacity: 1,
-        sticky: true
-      })
-      .addTo(state.cityDetailLayer);
-    addDetailLabel(station.name, station.lat, station.lon, "station-label", 13);
-  });
-
   const metroNetwork = await resolveCityMetroNetwork(city);
   if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
-  state.activeSubwayLineCount = metroNetwork.lines.length;
-  renderMetroLines(metroNetwork, detailBounds);
-
-  const subwayStations = await resolveCitySubwayStations(city, detailBounds, boundaryData, metroNetwork);
+  const subwayStations = await resolveCitySubwayStations(city, queryBounds, boundaryData, metroNetwork);
   if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
-  state.activeSubwayStationCount = subwayStations.length;
-
-  subwayStations.forEach((station) => {
-    detailBounds.extend([station.lat, station.lon]);
-    mapController.addCircleMarker([station.lat, station.lon], {
-      renderer: state.canvasRenderer,
-      radius: station.source === "metro-network" ? 3.4 : 4.4,
-      color: "#fffaf0",
-      weight: 1,
-      fillColor: metroColor(station.color),
-      fillOpacity: 0.96,
-      opacity: 1
-    })
-      .bindTooltip(`${station.name} / ${station.lineName ? `${station.lineName} ` : ""}\u5730\u94c1\u7ad9`, {
-        className: "city-tooltip",
-        direction: "top",
-        offset: [0, -8],
-        opacity: 1,
-        sticky: true
-      })
-      .addTo(state.cityDetailLayer);
+  const foodArticles = articlesForCity(city.id);
+  mapController.renderCityDetail({
+    city,
+    sourceFeature: districts.length ? null : sourceLayer?.feature || null,
+    districts,
+    subareas,
+    landmarks: landmarks.map((landmark) => ({
+      ...landmark,
+      symbol: landmarkSymbol(landmark.type),
+      typeLabel: landmarkTypeLabel(landmark.type),
+      popupHtml: landmarkPopupHtml(landmark, city)
+    })),
+    stations,
+    metroLines: metroNetwork.lines || [],
+    subwayStations,
+    foodMarkers: foodArticleMarkerDescriptors(foodArticles),
+    foodArticleCount: foodArticles.length
   });
-
-  renderFoodArticleMarkers(city, detailBounds);
-
-  if (!detailBounds.isValid()) return;
-  mapController.fitBounds(detailBounds.pad(0.18), {
-    paddingTopLeft: [28, 28],
-    paddingBottomRight: [28, 28],
-    animate: true,
-    duration: 0.35
-  });
-}
-
-function districtBoundaryStyle(feature) {
-  const index = feature && feature.properties ? Number(feature.properties.subFeatureIndex || 0) : 0;
-  const fills = ["#dfe9d7", "#e9f1dd", "#d7e8dc", "#edf0d8", "#dbeade"];
-  return {
-    color: "#6f8c73",
-    weight: 1.05,
-    fillColor: fills[index % fills.length],
-    fillOpacity: 0.86,
-    opacity: 0.96
-  };
 }
 
 async function fetchCityDistrictBoundaries(city) {
@@ -2564,6 +2428,47 @@ function districtLabelPoint(feature) {
   const point = Array.isArray(props.centroid) ? props.centroid : Array.isArray(props.center) ? props.center : null;
   if (!point || point.length < 2) return null;
   return { lon: point[0], lat: point[1] };
+}
+
+function cityDetailQueryBounds(boundaryData, points = []) {
+  const bounds = { south: Infinity, west: Infinity, north: -Infinity, east: -Infinity };
+  const includePoint = (lon, lat) => {
+    if (!Number.isFinite(Number(lon)) || !Number.isFinite(Number(lat))) return;
+    bounds.south = Math.min(bounds.south, Number(lat));
+    bounds.west = Math.min(bounds.west, Number(lon));
+    bounds.north = Math.max(bounds.north, Number(lat));
+    bounds.east = Math.max(bounds.east, Number(lon));
+  };
+  const includeCoordinates = (coordinates) => {
+    if (!Array.isArray(coordinates)) return;
+    if (coordinates.length >= 2 && Number.isFinite(Number(coordinates[0])) && Number.isFinite(Number(coordinates[1]))) {
+      includePoint(coordinates[0], coordinates[1]);
+      return;
+    }
+    coordinates.forEach(includeCoordinates);
+  };
+  const includeGeoJson = (data) => {
+    if (!data) return;
+    if (data.type === "FeatureCollection") return data.features?.forEach(includeGeoJson);
+    if (data.type === "Feature") return includeGeoJson(data.geometry);
+    if (data.type === "GeometryCollection") return data.geometries?.forEach(includeGeoJson);
+    includeCoordinates(data.coordinates);
+  };
+  includeGeoJson(boundaryData);
+  points.forEach((point) => includePoint(point.lon, point.lat));
+  return Number.isFinite(bounds.south) ? bounds : null;
+}
+
+function paddedQueryBounds(bounds, ratio) {
+  if (!bounds) return null;
+  const latPadding = (bounds.north - bounds.south) * ratio;
+  const lonPadding = (bounds.east - bounds.west) * ratio;
+  return {
+    south: bounds.south - latPadding,
+    west: bounds.west - lonPadding,
+    north: bounds.north + latPadding,
+    east: bounds.east + lonPadding
+  };
 }
 
 function districtPlaceFromFeature(city, feature) {
@@ -2597,19 +2502,6 @@ function districtPlaceFromFeature(city, feature) {
   upsertRuntimePlaces(placeIndex, [place]);
   syncPlaceIndex();
   return place;
-}
-
-function addDetailLabel(name, lat, lon, className, fontSize) {
-  mapController.addMarker([lat, lon], {
-    interactive: false,
-    keyboard: false,
-    icon: mapController.divIcon({
-      className,
-      html: `<span style="font-size:${fontSize}px">${escapeHtml(name)}</span>`,
-      iconSize: null,
-      iconAnchor: [0, 0]
-    })
-  }).addTo(state.cityDetailLayer);
 }
 
 function citySubareas(city) {
@@ -2678,12 +2570,12 @@ function landmarkPriority(landmark) {
 }
 
 async function fetchTourismLandmarksFromOsm(city, bounds) {
-  if (!bounds || !bounds.isValid()) return [];
-  const bbox = bounds.pad(0.04);
-  const south = bbox.getSouth().toFixed(5);
-  const west = bbox.getWest().toFixed(5);
-  const north = bbox.getNorth().toFixed(5);
-  const east = bbox.getEast().toFixed(5);
+  const bbox = paddedQueryBounds(bounds, 0.04);
+  if (!bbox) return [];
+  const south = bbox.south.toFixed(5);
+  const west = bbox.west.toFixed(5);
+  const north = bbox.north.toFixed(5);
+  const east = bbox.east.toFixed(5);
   const selector = `[tourism~"^(attraction|museum|theme_park|zoo|aquarium|viewpoint|gallery)$"]`;
   const query = `[out:json][timeout:16];(node(${south},${west},${north},${east})${selector};way(${south},${west},${north},${east})${selector};relation(${south},${west},${north},${east})${selector};node(${south},${west},${north},${east})[historic][name];way(${south},${west},${north},${east})[historic][name];relation(${south},${west},${north},${east})[historic][name];);out center tags 120;`;
   const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
@@ -2818,48 +2710,6 @@ function metroCityKeys(city) {
   return Array.from(new Set([aliases[key], key, normalizeKey(city.name)].filter(Boolean)));
 }
 
-function renderMetroLines(network, detailBounds) {
-  (network.lines || []).forEach((line) => {
-    const points = (line.coordinates || [])
-      .map((coord) => [Number(coord[1]), Number(coord[0])])
-      .filter(([lat, lon]) => Number.isFinite(lat) && Number.isFinite(lon));
-    if (points.length < 2) return;
-    points.forEach((point) => detailBounds.extend(point));
-
-    mapController.addPolyline(points, {
-      renderer: state.canvasRenderer,
-      color: "#fffaf0",
-      weight: 7,
-      opacity: 0.74,
-      interactive: false,
-      lineCap: "round",
-      lineJoin: "round"
-    }).addTo(state.cityDetailLayer);
-
-    mapController.addPolyline(points, {
-      renderer: state.canvasRenderer,
-      color: metroColor(line.color),
-      weight: 4,
-      opacity: 0.92,
-      interactive: true,
-      lineCap: "round",
-      lineJoin: "round"
-    })
-      .bindTooltip(`${line.name} / \u5730\u94c1\u7ebf\u8def`, {
-        className: "city-tooltip",
-        direction: "top",
-        opacity: 1,
-        sticky: true
-      })
-      .addTo(state.cityDetailLayer);
-  });
-}
-
-function metroColor(color) {
-  const text = String(color || "").replace(/^#/, "").trim();
-  return /^[0-9a-f]{6}$/i.test(text) ? `#${text}` : "#0f8f83";
-}
-
 async function resolveCitySubwayStations(city, bounds, boundaryData, metroNetwork = null) {
   const cacheKey = state.cityAdcodes.get(city.id) || city.id;
   if (state.subwayStationCache.has(cacheKey)) return state.subwayStationCache.get(cacheKey);
@@ -2922,12 +2772,12 @@ function addPassengerStationName(names, name) {
 }
 
 async function fetchRailwayStationsFromOsm(city, bounds, passengerStationNames) {
-  if (!bounds || !bounds.isValid()) return [];
-  const bbox = bounds.pad(0.03);
-  const south = bbox.getSouth().toFixed(5);
-  const west = bbox.getWest().toFixed(5);
-  const north = bbox.getNorth().toFixed(5);
-  const east = bbox.getEast().toFixed(5);
+  const bbox = paddedQueryBounds(bounds, 0.03);
+  if (!bbox) return [];
+  const south = bbox.south.toFixed(5);
+  const west = bbox.west.toFixed(5);
+  const north = bbox.north.toFixed(5);
+  const east = bbox.east.toFixed(5);
   const query = `[out:json][timeout:12];(node(${south},${west},${north},${east})[railway=station];way(${south},${west},${north},${east})[railway=station];relation(${south},${west},${north},${east})[railway=station];);out center tags 80;`;
   const url = `https://overpass-api.de/api/interpreter?data=${encodeURIComponent(query)}`;
 
@@ -2941,12 +2791,12 @@ async function fetchRailwayStationsFromOsm(city, bounds, passengerStationNames) 
 }
 
 async function fetchSubwayStationsFromOsm(city, bounds) {
-  if (!bounds || !bounds.isValid()) return [];
-  const bbox = bounds.pad(0.03);
-  const south = bbox.getSouth().toFixed(5);
-  const west = bbox.getWest().toFixed(5);
-  const north = bbox.getNorth().toFixed(5);
-  const east = bbox.getEast().toFixed(5);
+  const bbox = paddedQueryBounds(bounds, 0.03);
+  if (!bbox) return [];
+  const south = bbox.south.toFixed(5);
+  const west = bbox.west.toFixed(5);
+  const north = bbox.north.toFixed(5);
+  const east = bbox.east.toFixed(5);
   const filters = [
     "[railway=station][station=subway]",
     "[railway=station][subway=yes]",
@@ -3288,42 +3138,19 @@ function renderFoodPanel() {
   });
 }
 
-function renderFoodArticleMarkers(city, detailBounds) {
-  const articles = articlesForCity(city.id);
+function foodArticleMarkerDescriptors(articles) {
   const markerArticles = articles.filter(hasCoordinates);
-  state.activeFoodArticleCount = articles.length;
-  if (!markerArticles.length) return;
-
   const placeOffsets = new Map();
-  markerArticles.forEach((article) => {
+  return markerArticles.map((article) => {
     const offsetIndex = placeOffsets.get(article.placeId) || 0;
     placeOffsets.set(article.placeId, offsetIndex + 1);
     const offset = foodMarkerOffset(offsetIndex);
-    const lat = Number(article.lat) + offset.lat;
-    const lon = Number(article.lon) + offset.lon;
-    detailBounds.extend([lat, lon]);
-    mapController.addMarker([lat, lon], {
-      pane: "foodMarkers",
-      icon: mapController.divIcon({
-        className: "",
-        html: `<span class="food-marker"><span>食</span></span>`,
-        iconSize: [22, 22],
-        iconAnchor: [11, 11]
-      })
-    })
-      .bindTooltip(`${article.title} / 食行记`, {
-        className: "city-tooltip",
-        direction: "top",
-        offset: [0, -8],
-        opacity: 1,
-        sticky: true
-      })
-      .bindPopup(foodArticlePopupHtml(article), {
-        className: "food-popup-shell",
-        maxWidth: 320,
-        minWidth: 250
-      })
-      .addTo(state.cityDetailLayer);
+    return {
+      title: article.title,
+      lat: Number(article.lat) + offset.lat,
+      lon: Number(article.lon) + offset.lon,
+      popupHtml: foodArticlePopupHtml(article)
+    };
   });
 }
 
@@ -3664,6 +3491,7 @@ async function initApp() {
       },
       callbacks: {
         queueCityClick,
+        queuePlaceClick,
         enterCityView,
         cancelQueuedCityClick,
         renderPanel,
