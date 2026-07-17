@@ -6,28 +6,57 @@ function withVersion(path, version) {
   return `${path}${separator}v=${encodeURIComponent(version)}`;
 }
 
+function createAttemptSignal(externalSignal, timeoutMs) {
+  const controller = new AbortController();
+  let timeoutId;
+  let removeExternalListener;
+
+  if (externalSignal) {
+    const forwardExternalAbort = () => controller.abort(externalSignal.reason);
+    if (externalSignal.aborted) {
+      forwardExternalAbort();
+    } else {
+      externalSignal.addEventListener("abort", forwardExternalAbort, { once: true });
+      removeExternalListener = () => {
+        externalSignal.removeEventListener("abort", forwardExternalAbort);
+      };
+    }
+  }
+
+  if (timeoutMs && !controller.signal.aborted) {
+    timeoutId = setTimeout(() => {
+      controller.abort(new DOMException("Request timed out", "TimeoutError"));
+    }, timeoutMs);
+  }
+
+  return {
+    signal: controller.signal,
+    cleanup() {
+      if (timeoutId !== undefined) clearTimeout(timeoutId);
+      removeExternalListener?.();
+    }
+  };
+}
+
 export function createJsonLoader({ fetchImpl = fetch, version = ASSET_VERSION } = {}) {
   async function loadJson(path, options = {}) {
     const attempts = Number(options.retries || 0) + 1;
     let lastError;
 
     for (let attempt = 0; attempt < attempts; attempt += 1) {
+      const attemptSignal = createAttemptSignal(options.signal, options.timeoutMs);
       try {
-        const timeoutSignal = options.timeoutMs
-          ? AbortSignal.timeout(options.timeoutMs)
-          : null;
-        const signal = options.signal && timeoutSignal
-          ? AbortSignal.any([options.signal, timeoutSignal])
-          : options.signal || timeoutSignal || undefined;
         const response = await fetchImpl(withVersion(path, version), {
           cache: options.cache || "force-cache",
-          signal
+          signal: attemptSignal.signal
         });
         if (!response.ok) throw new Error(`${path} HTTP ${response.status}`);
         return await response.json();
       } catch (error) {
         lastError = error;
         if (options.signal?.aborted || attempt + 1 >= attempts) throw error;
+      } finally {
+        attemptSignal.cleanup();
       }
     }
 

@@ -1,5 +1,6 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import {
   ASSET_VERSION,
   PREFECTURE_CHUNK_COUNT,
@@ -117,11 +118,19 @@ test("deferred county and food requests are independently memoized", async () =>
   };
   const loaders = createDeferredDataLoaders({ loadOptionalJson });
 
+  const countyPromiseA = loaders.loadCountySummary();
+  const countyPromiseB = loaders.loadCountySummary();
+  const foodPromiseA = loaders.loadFoodSummary();
+  const foodPromiseB = loaders.loadFoodSummary();
+
+  assert.strictEqual(countyPromiseA, countyPromiseB);
+  assert.strictEqual(foodPromiseA, foodPromiseB);
+
   const [countyA, countyB, foodA, foodB] = await Promise.all([
-    loaders.loadCountySummary(),
-    loaders.loadCountySummary(),
-    loaders.loadFoodSummary(),
-    loaders.loadFoodSummary()
+    countyPromiseA,
+    countyPromiseB,
+    foodPromiseA,
+    foodPromiseB
   ]);
 
   assert.strictEqual(countyA, countyB);
@@ -173,11 +182,16 @@ test("versioned JSON appends a question-mark query when none exists", async () =
 function pendingUntilAborted(onSignal) {
   return async (_url, { signal }) => new Promise((_resolve, reject) => {
     onSignal(signal);
-    const rejectAbort = () => reject(new DOMException("Aborted", "AbortError"));
+    const rejectAbort = () => reject(signal.reason);
     if (signal.aborted) rejectAbort();
     else signal.addEventListener("abort", rejectAbort, { once: true });
   });
 }
+
+test("the JSON loader does not require AbortSignal static composition methods", async () => {
+  const source = await readFile(new URL("../public/static-site/app-data.js", import.meta.url), "utf8");
+  assert.doesNotMatch(source, /AbortSignal\.(?:timeout|any)\s*\(/);
+});
 
 test("an external abort reaches the combined fetch signal and rejects loadJson", async () => {
   const externalController = new AbortController();
@@ -196,10 +210,11 @@ test("an external abort reaches the combined fetch signal and rejects loadJson",
     timeoutMs: 1_000
   });
   await signalReady;
-  externalController.abort();
+  externalController.abort(new DOMException("Cancelled", "AbortError"));
 
   await assert.rejects(request, { name: "AbortError" });
   assert.equal(combinedSignal.aborted, true);
+  assert.strictEqual(combinedSignal.reason, externalController.signal.reason);
 });
 
 test("a request timeout aborts a pending fetch and rejects loadJson", async () => {
@@ -210,9 +225,10 @@ test("a request timeout aborts a pending fetch and rejects loadJson", async () =
 
   await assert.rejects(
     loadJson("./data/slow.json", { timeoutMs: 1 }),
-    { name: "AbortError" }
+    { name: "TimeoutError" }
   );
   assert.equal(observedSignal.aborted, true);
+  assert.equal(observedSignal.reason.name, "TimeoutError");
 });
 
 test("non-ok JSON responses reject with path and status", async () => {
