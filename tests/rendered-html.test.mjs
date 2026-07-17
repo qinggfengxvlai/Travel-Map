@@ -4,6 +4,7 @@ import { readFile } from "node:fs/promises";
 
 const htmlUrl = new URL("../public/static-site/index.html", import.meta.url);
 const appUrl = new URL("../public/static-site/app.js", import.meta.url);
+const mapCoreUrl = new URL("../public/static-site/map-core.js", import.meta.url);
 const stylesUrl = new URL("../public/static-site/styles.css", import.meta.url);
 const packageUrl = new URL("../package.json", import.meta.url);
 const litePrefectureUrls = Array.from(
@@ -233,6 +234,7 @@ test("app coordinates TripPlan through the calendar modules and one commit entry
 
 test("app renders critical map data before hydrating optional summaries", async () => {
   const app = await readFile(appUrl, "utf8");
+  const mapCore = await readFile(mapCoreUrl, "utf8");
 
   assert.match(
     app,
@@ -274,17 +276,18 @@ test("app renders critical map data before hydrating optional summaries", async 
   const initApp = functionSource(app, "initApp");
   const startupSteps = [
     "await loadMapData()",
-    "initMap()",
+    "createMapController({",
+    "mapController.init()",
     "restoreTripState()",
-    'setMobileView("plan")',
-    "renderRoutes()",
+    'mapController.setMobileView("plan")',
+    "mapController.renderRoutes()",
     "renderPanel()",
     'document.documentElement.dataset.appReady = "map"',
     "scheduleIdle("
   ];
   let previousIndex = -1;
   for (const step of startupSteps) {
-    const index = initApp.indexOf(step);
+    const index = initApp.indexOf(step, previousIndex + 1);
     assert.ok(index > previousIndex, `expected ${step} after the previous startup step`);
     previousIndex = index;
   }
@@ -299,8 +302,8 @@ test("app renders critical map data before hydrating optional summaries", async 
   assert.match(loadMapData, /state\.failedBoundaryPaths\s*=/);
   assert.match(app, /state\.failedBoundaryPaths\.length[\s\S]*?renderOperationalWarnings/);
 
-  assert.match(app, /if\s*\(\s*bounds\.isValid\s*\(\s*\)\s*\)/);
-  assert.match(app, /L\.latLngBounds\s*\(\s*state\.cities\.map/);
+  assert.match(mapCore, /if\s*\(\s*bounds\.isValid\s*\(\s*\)\s*\)/);
+  assert.match(mapCore, /L\.latLngBounds\s*\(\s*state\.cities\.map/);
   assert.doesNotMatch(app, /throw new Error\s*\(\s*["']china-prefectures data is empty["']\s*\)/);
   assert.match(app, /loadOptionalJson\s*\(\s*`\.\/data\/counties\/by-city\/\$\{cityId\}\.json`/);
   assert.match(app, /loadOptionalJson\s*\(\s*`\.\/data\/food-articles\/by-city\/\$\{cityId\}\.json`/);

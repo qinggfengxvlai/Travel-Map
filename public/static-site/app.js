@@ -65,11 +65,13 @@ import {
   normalizeSearchText,
   upsertRuntimePlaces
 } from "./place-index.js";
+import { createMapController } from "./map-core.js";
 
 const tripArchiveStorage = createLazyStorageAdapter(() => window.localStorage);
 const { loadJson, loadOptionalJson } = createJsonLoader();
 const deferredData = createDeferredDataLoaders({ loadOptionalJson });
 let placeIndex = null;
+let mapController = null;
 
 const labels = {
   chooseStart: "\u9009\u62e9\u51fa\u53d1\u57ce\u5e02",
@@ -454,43 +456,6 @@ const subwayStationCatalog = {
   ]
 };
 
-const provinceCodeNames = {
-  11: "\u5317\u4eac",
-  12: "\u5929\u6d25",
-  13: "\u6cb3\u5317",
-  14: "\u5c71\u897f",
-  15: "\u5185\u8499\u53e4",
-  21: "\u8fbd\u5b81",
-  22: "\u5409\u6797",
-  23: "\u9ed1\u9f99\u6c5f",
-  31: "\u4e0a\u6d77",
-  32: "\u6c5f\u82cf",
-  33: "\u6d59\u6c5f",
-  34: "\u5b89\u5fbd",
-  35: "\u798f\u5efa",
-  36: "\u6c5f\u897f",
-  37: "\u5c71\u4e1c",
-  41: "\u6cb3\u5357",
-  42: "\u6e56\u5317",
-  43: "\u6e56\u5357",
-  44: "\u5e7f\u4e1c",
-  45: "\u5e7f\u897f",
-  46: "\u6d77\u5357",
-  50: "\u91cd\u5e86",
-  51: "\u56db\u5ddd",
-  52: "\u8d35\u5dde",
-  53: "\u4e91\u5357",
-  54: "\u897f\u85cf",
-  61: "\u9655\u897f",
-  62: "\u7518\u8083",
-  63: "\u9752\u6d77",
-  64: "\u5b81\u590f",
-  65: "\u65b0\u7586",
-  71: "\u53f0\u6e7e",
-  81: "\u9999\u6e2f",
-  82: "\u6fb3\u95e8"
-};
-
 const state = {
   selectedCityId: null,
   transportMode: "highspeed",
@@ -734,166 +699,6 @@ function enrichPlaceSearchTextWithArticles() {
   state.counties.forEach(appendArticleText);
 }
 
-function initMap() {
-  if (!window.L) throw new Error("Leaflet renderer did not load");
-
-  state.canvasRenderer = L.canvas({ padding: 0.65, tolerance: 8 });
-  state.map = L.map("travelMap", {
-    preferCanvas: true,
-    renderer: state.canvasRenderer,
-    zoomControl: true,
-    attributionControl: true,
-    minZoom: 3,
-    maxZoom: 14,
-    zoomSnap: 0.25,
-    wheelPxPerZoomLevel: 90,
-    doubleClickZoom: false
-  });
-
-  state.map.attributionControl.setPrefix("Leaflet Canvas");
-  state.map.createPane("cityLabels");
-  state.map.getPane("cityLabels").style.zIndex = 650;
-  state.map.getPane("cityLabels").style.pointerEvents = "none";
-  state.map.createPane("foodMarkers");
-  state.map.getPane("foodMarkers").style.zIndex = 720;
-  state.routeLayer = L.layerGroup().addTo(state.map);
-  state.cityLayer = L.layerGroup().addTo(state.map);
-  state.labelLayer = L.layerGroup([], { pane: "cityLabels" }).addTo(state.map);
-  state.cityDetailLayer = L.layerGroup().addTo(state.map);
-
-  renderChinaLayer();
-  renderCities();
-  fitChina();
-  updateVisibleLabels();
-  state.map.on("moveend zoomend", updateVisibleLabels);
-}
-
-function renderChinaLayer() {
-  state.chinaLayer = L.geoJSON(state.mapData, {
-    renderer: state.canvasRenderer,
-    interactive: true,
-    style: featureStyle,
-    onEachFeature: (feature, layer) => {
-      const city = matchFeatureToCity(feature);
-      if (!city) return;
-      state.featureCityIds.set(layer, city.id);
-      state.cityFeatureLayers.set(city.id, layer);
-      state.cityAdcodes.set(city.id, String(feature.properties.id || feature.properties.adcode || ""));
-      layer.bindTooltip(`${city.name} / ${city.province}`, {
-        className: "city-tooltip",
-        direction: "center",
-        opacity: 0.95,
-        sticky: true
-      });
-      layer.on({
-        click: () => queueCityClick(city.id),
-        dblclick: (event) => {
-          if (event.originalEvent) L.DomEvent.stop(event.originalEvent);
-          enterCityView(city.id);
-        },
-        mouseover: () => layer.setStyle({ fillOpacity: 0.98, weight: 1.45, color: "#78916c" }),
-        mouseout: () => layer.setStyle(featureStyle(feature))
-      });
-    }
-  }).addTo(state.map);
-}
-
-function matchFeatureToCity(feature) {
-  if (feature && feature.properties && String(feature.properties.id || "") === "710000") return cityById("taiwan-region");
-
-  const featureName = feature && feature.properties ? feature.properties.name : "";
-  const featureKey = normalizeKey(featureName);
-  const provinceName = provinceNameFromFeature(feature);
-  if (provinceName) {
-    const exactProvinceMatch = state.cityByProvinceKey.get(`${provinceName}|${featureKey}`);
-    if (exactProvinceMatch) return exactProvinceMatch;
-
-    const provinceMatches = Array.from(state.cityByProvinceKey.entries())
-      .filter(([key]) => key.startsWith(`${provinceName}|`))
-      .sort((a, b) => b[0].length - a[0].length);
-    const foundInProvince = provinceMatches.find(([key]) => {
-      const cityKey = key.split("|")[1];
-      return cityKey.length >= 3 && (featureKey.startsWith(cityKey) || cityKey.startsWith(featureKey));
-    });
-    if (foundInProvince) return foundInProvince[1];
-
-    return null;
-  }
-
-  if (state.cityByKey.has(featureKey)) return state.cityByKey.get(featureKey);
-
-  const found = state.cityKeyEntries.find(([cityKey]) => cityKey.length >= 3 && (featureKey.startsWith(cityKey) || cityKey.startsWith(featureKey)));
-  return found ? found[1] : null;
-}
-
-function provinceNameFromFeature(feature) {
-  const id = feature && feature.properties ? String(feature.properties.id || "") : "";
-  return provinceCodeNames[id.slice(0, 2)] || "";
-}
-
-function featureStyle(feature) {
-  const city = matchFeatureToCity(feature);
-  const isSelected = city && city.id === state.selectedCityId;
-  const isVisited = city && state.routes.some((route) => route.from === city.id || route.to === city.id);
-  return {
-    color: isSelected ? "#e84d3d" : isVisited ? "#168f7d" : "#b7c7ad",
-    weight: isSelected ? 1.7 : isVisited ? 1.2 : 0.85,
-    fillColor: isSelected ? "#ffe7bd" : isVisited ? "#d9f0e8" : "#dfe9d7",
-    fillOpacity: isSelected ? 0.98 : 0.9,
-    opacity: 0.95
-  };
-}
-
-function renderCities() {
-  state.cityLayer.clearLayers();
-
-  state.cities.forEach((city) => {
-    const marker = L.circleMarker([city.lat, city.lon], {
-      ...cityStyle(city.id),
-      renderer: state.canvasRenderer,
-      bubblingMouseEvents: false
-    });
-
-    marker.bindTooltip(`${city.name} / ${city.province}`, {
-      className: "city-tooltip",
-      direction: "top",
-      offset: [0, -8],
-      opacity: 1,
-      sticky: true
-    });
-    marker.on("click", () => queueCityClick(city.id));
-    marker.on("dblclick", (event) => {
-      if (event.originalEvent) L.DomEvent.stop(event.originalEvent);
-      enterCityView(city.id);
-    });
-    marker.addTo(state.cityLayer);
-    city.marker = marker;
-  });
-}
-
-function cityStyle(cityId) {
-  const visited = new Set(state.routes.flatMap((route) => [route.from, route.to]));
-  const isSelected = cityId === state.selectedCityId;
-  const isVisited = visited.has(cityId);
-  const hasFoodArticles = articleCountForCity(cityId) > 0;
-  return {
-    radius: isSelected ? 7 : isVisited ? 5 : hasFoodArticles ? 4.3 : 3.4,
-    color: isSelected ? "#e84d3d" : isVisited ? "#168f7d" : "#fffaf0",
-    weight: isSelected ? 2.5 : 1.25,
-    fillColor: isSelected ? "#ffe7bd" : isVisited ? "#168f7d" : hasFoodArticles ? "#c46b2a" : "#e84d3d",
-    fillOpacity: isSelected ? 1 : 0.92,
-    opacity: 1
-  };
-}
-
-function updateCityStyles() {
-  state.cities.forEach((city) => {
-    if (city.marker) city.marker.setStyle(cityStyle(city.id));
-  });
-  if (state.chinaLayer) state.chinaLayer.setStyle(featureStyle);
-  updateVisibleLabels();
-}
-
 function updateSearchResults() {
   const query = normalizeSearchText(citySearch.value);
   searchResults.replaceChildren();
@@ -979,47 +784,16 @@ async function selectSearchResult(item) {
       await enterCityView(targetCity.id);
     }
     if (hasCoordinates(county)) {
-      state.map.flyTo([county.lat, county.lon], Math.max(state.map.getZoom(), 10), { duration: 0.45 });
+      mapController.flyTo([county.lat, county.lon], Math.max(mapController.getZoom(), 10), { duration: 0.45 });
     }
     handlePlaceClick(county.id);
   } else {
     if (state.viewMode === "city") exitCityView({ fit: false });
-    state.map.flyTo([item.lat, item.lon], Math.max(state.map.getZoom(), 10), { duration: 0.45 });
+    mapController.flyTo([item.lat, item.lon], Math.max(mapController.getZoom(), 10), { duration: 0.45 });
     handlePlaceClick(targetCity.id);
   }
   citySearch.value = "";
   updateSearchResults();
-}
-
-function updateVisibleLabels() {
-  if (!state.map || !state.labelLayer || !state.cities.length) return;
-  if (state.viewMode === "city") {
-    state.labelLayer.clearLayers();
-    return;
-  }
-  const bounds = state.map.getBounds().pad(0.08);
-  const zoom = state.map.getZoom();
-  const fontSize = Math.max(10, Math.min(20, Math.round(zoom * 2.2 + 1)));
-  const selectedCity = cityById(state.selectedCityId);
-  state.labelLayer.clearLayers();
-
-  state.cities.forEach((city) => {
-    const isSelected = selectedCity && selectedCity.id === city.id;
-    if (!isSelected && !bounds.contains([city.lat, city.lon])) return;
-
-    const marker = L.marker([city.lat, city.lon], {
-      pane: "cityLabels",
-      interactive: false,
-      keyboard: false,
-      icon: L.divIcon({
-        className: "city-name-marker",
-        html: `<span style="font-size:${fontSize}px">${escapeHtml(city.name)}</span>`,
-        iconSize: null,
-        iconAnchor: [0, 0]
-      })
-    });
-    marker.addTo(state.labelLayer);
-  });
 }
 
 function escapeHtml(value) {
@@ -1102,26 +876,6 @@ function safeExternalUrl(value) {
   }
 }
 
-function fitChina() {
-  if (!state.chinaLayer) return;
-  const bounds = state.chinaLayer.getBounds();
-  if (bounds.isValid()) {
-    state.map.fitBounds(bounds, {
-      paddingTopLeft: [28, 28],
-      paddingBottomRight: [28, 28],
-      animate: false
-    });
-    return;
-  }
-  const fallbackBounds = L.latLngBounds(state.cities.map((city) => [city.lat, city.lon]));
-  if (!fallbackBounds.isValid()) return;
-  state.map.fitBounds(fallbackBounds, {
-    paddingTopLeft: [28, 28],
-    paddingBottomRight: [28, 28],
-    animate: false
-  });
-}
-
 async function resetMapView() {
   if (state.viewMode === "city") {
     const activeCity = cityById(state.activeCityViewId);
@@ -1131,62 +885,7 @@ async function resetMapView() {
     }
     return;
   }
-  fitChina();
-}
-
-function renderRoutes() {
-  state.routeLayer.clearLayers();
-
-  state.routes.forEach((route) => {
-    const from = placeById(route.from);
-    const to = placeById(route.to);
-    if (!from || !to) return;
-    const routePoints = curvedRoutePoints(from, to);
-
-    L.polyline(routePoints, {
-      renderer: state.canvasRenderer,
-      color: route.status === "error" ? "#d75b4f" : "#1f9d8a",
-      weight: 9,
-      opacity: 0.11,
-      interactive: false
-    }).addTo(state.routeLayer);
-
-    L.polyline(routePoints, {
-      renderer: state.canvasRenderer,
-      color: route.status === "error" ? "#d75b4f" : route.status === "loading" ? "#e7aa38" : "#168f7d",
-      weight: 3.2,
-      opacity: 0.78,
-      dashArray: route.status === "success" ? "10 9" : route.status === "error" ? "4 10" : "6 10",
-      lineCap: "round",
-      interactive: false
-    }).addTo(state.routeLayer);
-  });
-}
-
-function curvedRoutePoints(from, to) {
-  const start = { lat: from.lat, lon: from.lon };
-  const end = { lat: to.lat, lon: to.lon };
-  const deltaLat = end.lat - start.lat;
-  const deltaLon = end.lon - start.lon;
-  const distance = Math.hypot(deltaLat, deltaLon);
-  if (!distance) return [[start.lat, start.lon], [end.lat, end.lon]];
-
-  const curve = Math.min(distance * 0.16, 0.16);
-  const normalLat = -deltaLon / distance;
-  const normalLon = deltaLat / distance;
-  const control = {
-    lat: (start.lat + end.lat) / 2 + normalLat * curve,
-    lon: (start.lon + end.lon) / 2 + normalLon * curve
-  };
-
-  return Array.from({ length: 18 }, (_, index) => {
-    const t = index / 17;
-    const inv = 1 - t;
-    return [
-      inv * inv * start.lat + 2 * inv * t * control.lat + t * t * end.lat,
-      inv * inv * start.lon + 2 * inv * t * control.lon + t * t * end.lon
-    ];
-  });
+  mapController?.fitChina();
 }
 
 function isValidRouteId(routeId) {
@@ -1254,7 +953,7 @@ function syncRoutesFromTripPlan() {
 
   state.routes = nextRoutes;
   state.selectedCityId = placeIds.at(-1) ?? null;
-  routesToEstimate.forEach((route) => calculateRouteMetrics(route));
+  routesToEstimate.forEach((route) => mapController?.calculateRouteMetrics(route));
 }
 
 function commitTripPlan(nextPlan, {
@@ -1274,7 +973,7 @@ function commitTripPlan(nextPlan, {
   state.tripPace = resolveTripPace(nextPlan, state.tripPace);
   state.transportMode = resolveTripTransportMode(nextPlan);
   syncRoutesFromTripPlan();
-  renderRoutes();
+  mapController?.renderRoutes();
   renderPanel();
   if (focusToken) {
     restoreTripEditorFocus(tripEditorRoot, focusToken);
@@ -1661,7 +1360,7 @@ function renderPanel() {
     if (mapBadgeLabel) mapBadgeLabel.textContent = "\u53ef\u70b9\u51fb\u57ce\u5e02";
   }
   routeCount.textContent = String(state.routes.length);
-  updateCityStyles();
+  mapController?.updateCityStyles();
   updateTotals();
   chainLabel.textContent = buildChainLabel();
   renderTripPlanner();
@@ -2235,7 +1934,7 @@ function rollbackTripImportSnapshot(snapshot, {
     try {
       syncTransportButtons();
       syncPaceButtons();
-      renderRoutes();
+      mapController?.renderRoutes();
       renderPanel();
     } catch (error) {
       restored = false;
@@ -2564,17 +2263,6 @@ function updateArchiveStatus(message, tone = "") {
   tripArchiveStatus.className = `archive-status${tone ? ` ${tone}` : ""}`;
 }
 
-function setMobileView(view) {
-  if (!appShell || !["plan", "map"].includes(view)) return;
-  appShell.classList.toggle("mobile-plan", view === "plan");
-  appShell.classList.toggle("mobile-map", view === "map");
-  mobileViewButtons.forEach((button) => {
-    const active = button.dataset.mobileView === view;
-    button.classList.toggle("active", active);
-    button.setAttribute("aria-selected", String(active));
-  });
-}
-
 function placeContext(place) {
   if (!place) return "";
   if (place.placeType === "county") return `${place.parentCityName || place.province} / ${place.name}`;
@@ -2654,41 +2342,19 @@ async function enterCityView(cityId) {
   state.viewMode = "city";
   state.activeCityViewId = city.id;
 
-  [state.chinaLayer, state.cityLayer, state.labelLayer].forEach((layer) => {
-    if (layer && state.map.hasLayer(layer)) state.map.removeLayer(layer);
-  });
-  if (state.routeLayer && !state.map.hasLayer(state.routeLayer)) state.routeLayer.addTo(state.map);
-  if (!state.map.hasLayer(state.cityDetailLayer)) state.cityDetailLayer.addTo(state.map);
+  mapController.enterCityView();
   await renderCityDetail(city);
   exitCityViewBtn.hidden = false;
   renderPanel();
 }
 
 function exitCityView(options = {}) {
-  if (!state.map) return;
-  cancelQueuedCityClick();
-  state.viewMode = "china";
-  state.activeCityViewId = null;
-  state.activeDistrictBoundaryCount = 0;
-  state.activeLandmarkCount = 0;
-  state.activeStationCount = 0;
-  state.activeSubwayLineCount = 0;
-  state.activeSubwayStationCount = 0;
-  if (state.cityDetailLayer) state.cityDetailLayer.clearLayers();
-
-  [state.chinaLayer, state.routeLayer, state.cityLayer, state.labelLayer].forEach((layer) => {
-    if (layer && !state.map.hasLayer(layer)) layer.addTo(state.map);
-  });
-  exitCityViewBtn.hidden = true;
-  renderRoutes();
-  updateCityStyles();
-  if (options.fit !== false) fitChina();
-  renderPanel();
+  mapController?.enterChinaView(options);
 }
 
 async function renderCityDetail(city) {
   state.cityDetailLayer.clearLayers();
-  const detailBounds = L.latLngBounds([]);
+  const detailBounds = mapController.createBounds([]);
   await Promise.all([
     ensureCityCounties(city.id),
     ensureCityFoodArticles(city.id)
@@ -2702,7 +2368,7 @@ async function renderCityDetail(city) {
   state.activeDistrictBoundaryCount = districtData && Array.isArray(districtData.features) ? districtData.features.length : 0;
 
   if (!state.activeDistrictBoundaryCount && sourceLayer && sourceLayer.feature) {
-    const outline = L.geoJSON(sourceLayer.feature, {
+    const outline = mapController.addGeoJson(sourceLayer.feature, {
       renderer: state.canvasRenderer,
       interactive: false,
       style: () => ({
@@ -2717,7 +2383,7 @@ async function renderCityDetail(city) {
   }
 
   if (districtData && Array.isArray(districtData.features) && districtData.features.length) {
-    const districtLayer = L.geoJSON(districtData, {
+    const districtLayer = mapController.addGeoJson(districtData, {
       renderer: state.canvasRenderer,
       interactive: true,
       style: districtBoundaryStyle,
@@ -2743,7 +2409,7 @@ async function renderCityDetail(city) {
   } else {
     subareas.forEach((area) => {
       detailBounds.extend([area.lat, area.lon]);
-      L.circleMarker([area.lat, area.lon], {
+      mapController.addCircleMarker([area.lat, area.lon], {
         renderer: state.canvasRenderer,
         radius: 4.5,
         color: "#fffaf0",
@@ -2772,8 +2438,8 @@ async function renderCityDetail(city) {
 
   landmarks.forEach((landmark) => {
     detailBounds.extend([landmark.lat, landmark.lon]);
-    L.marker([landmark.lat, landmark.lon], {
-      icon: L.divIcon({
+    mapController.addMarker([landmark.lat, landmark.lon], {
+      icon: mapController.divIcon({
         className: "",
         html: `<span class="landmark-marker ${escapeHtml(landmark.type || "scenic")}"><span>${landmarkSymbol(landmark.type)}</span></span>`,
         iconSize: [18, 18],
@@ -2802,8 +2468,8 @@ async function renderCityDetail(city) {
 
   stations.forEach((station) => {
     detailBounds.extend([station.lat, station.lon]);
-    L.marker([station.lat, station.lon], {
-      icon: L.divIcon({
+    mapController.addMarker([station.lat, station.lon], {
+      icon: mapController.divIcon({
         className: "",
         html: `<span class="station-marker"><span>\u706b</span></span>`,
         iconSize: [20, 20],
@@ -2832,7 +2498,7 @@ async function renderCityDetail(city) {
 
   subwayStations.forEach((station) => {
     detailBounds.extend([station.lat, station.lon]);
-    L.circleMarker([station.lat, station.lon], {
+    mapController.addCircleMarker([station.lat, station.lon], {
       renderer: state.canvasRenderer,
       radius: station.source === "metro-network" ? 3.4 : 4.4,
       color: "#fffaf0",
@@ -2854,7 +2520,7 @@ async function renderCityDetail(city) {
   renderFoodArticleMarkers(city, detailBounds);
 
   if (!detailBounds.isValid()) return;
-  state.map.fitBounds(detailBounds.pad(0.18), {
+  mapController.fitBounds(detailBounds.pad(0.18), {
     paddingTopLeft: [28, 28],
     paddingBottomRight: [28, 28],
     animate: true,
@@ -2934,10 +2600,10 @@ function districtPlaceFromFeature(city, feature) {
 }
 
 function addDetailLabel(name, lat, lon, className, fontSize) {
-  L.marker([lat, lon], {
+  mapController.addMarker([lat, lon], {
     interactive: false,
     keyboard: false,
-    icon: L.divIcon({
+    icon: mapController.divIcon({
       className,
       html: `<span style="font-size:${fontSize}px">${escapeHtml(name)}</span>`,
       iconSize: null,
@@ -3160,7 +2826,7 @@ function renderMetroLines(network, detailBounds) {
     if (points.length < 2) return;
     points.forEach((point) => detailBounds.extend(point));
 
-    L.polyline(points, {
+    mapController.addPolyline(points, {
       renderer: state.canvasRenderer,
       color: "#fffaf0",
       weight: 7,
@@ -3170,7 +2836,7 @@ function renderMetroLines(network, detailBounds) {
       lineJoin: "round"
     }).addTo(state.cityDetailLayer);
 
-    L.polyline(points, {
+    mapController.addPolyline(points, {
       renderer: state.canvasRenderer,
       color: metroColor(line.color),
       weight: 4,
@@ -3465,7 +3131,7 @@ function isDisallowedRailwayFacilityName(name) {
 }
 
 function distanceToCity(point, city) {
-  return haversineDistance({ lon: point.lon, lat: point.lat }, city);
+  return mapController.distanceBetween({ lon: point.lon, lat: point.lat }, city);
 }
 
 function pointInGeoJson(point, data) {
@@ -3636,9 +3302,9 @@ function renderFoodArticleMarkers(city, detailBounds) {
     const lat = Number(article.lat) + offset.lat;
     const lon = Number(article.lon) + offset.lon;
     detailBounds.extend([lat, lon]);
-    L.marker([lat, lon], {
+    mapController.addMarker([lat, lon], {
       pane: "foodMarkers",
-      icon: L.divIcon({
+      icon: mapController.divIcon({
         className: "",
         html: `<span class="food-marker"><span>食</span></span>`,
         iconSize: [22, 22],
@@ -3730,8 +3396,8 @@ function setTransportMode(mode) {
   }
   state.transportMode = mode;
   syncTransportButtons();
-  recalculateRoutesForTransport();
-  renderRoutes();
+  mapController?.recalculateRoutesForTransport();
+  mapController?.renderRoutes();
   renderPanel();
   updateArchiveStatus("\u4ea4\u901a\u65b9\u5f0f\u5df2\u66f4\u65b0\uff0c\u9009\u62e9\u57ce\u5e02\u540e\u4f1a\u81ea\u52a8\u4fdd\u5b58\u3002");
 }
@@ -3769,35 +3435,6 @@ function syncPaceButtons() {
   });
 }
 
-function recalculateRoutesForTransport() {
-  state.routes.forEach((route) => {
-    const from = placeById(route.from);
-    const to = placeById(route.to);
-    if (!from || !to) return;
-    if (!hasCoordinates(from) || !hasCoordinates(to)) {
-      Object.assign(route, {
-        status: "error",
-        distance: null,
-        duration: null,
-        fallback: true,
-        error: "\u7f3a\u5c11\u5750\u6807\uff0c\u65e0\u6cd5\u4f30\u7b97\u884c\u7a0b"
-      });
-      return;
-    }
-
-    const estimate = estimateRailRoute(from, to, state.transportMode);
-    Object.assign(route, {
-      status: "success",
-      distance: estimate.distance,
-      duration: estimate.duration,
-      fallback: true,
-      error: null,
-      transportMode: estimate.mode,
-      transportLabel: estimate.label
-    });
-  });
-}
-
 function handlePlaceClick(placeId) {
   const place = placeById(placeId);
   if (!place) return;
@@ -3828,68 +3465,6 @@ function handlePlaceClick(placeId) {
 
 function handleCityClick(cityId) {
   handlePlaceClick(cityId);
-}
-
-function calculateRouteMetrics(route) {
-  const from = placeById(route.from);
-  const to = placeById(route.to);
-  if (!from || !to) return;
-  if (!hasCoordinates(from) || !hasCoordinates(to)) {
-    updateRouteMetrics(route, {
-      status: "error",
-      distance: null,
-      duration: null,
-      fallback: true,
-      error: "\u7f3a\u5c11\u5750\u6807\uff0c\u65e0\u6cd5\u4f30\u7b97\u884c\u7a0b"
-    });
-    return;
-  }
-
-  const estimate = estimateRailRoute(from, to, route.transportMode || state.transportMode);
-
-  updateRouteMetrics(route, {
-    status: "success",
-    distance: estimate.distance,
-    duration: estimate.duration,
-    fallback: true,
-    error: null,
-    transportMode: estimate.mode,
-    transportLabel: estimate.label
-  });
-}
-
-function updateRouteMetrics(route, updates) {
-  if (!state.routes.includes(route)) return;
-  Object.assign(route, updates);
-  renderRoutes();
-  renderPanel();
-  persistTripState();
-}
-
-function estimateRailRoute(from, to, mode = state.transportMode) {
-  const profile = transportProfile(mode);
-  const distance = haversineDistance(from, to) * profile.detourFactor;
-  const duration = distance / (profile.speedKmh * 1000 / 3600) + profile.bufferMinutes * 60;
-  return {
-    distance,
-    duration,
-    mode: transportProfiles[mode] ? mode : "highspeed",
-    label: profile.label
-  };
-}
-
-function haversineDistance(from, to) {
-  const earthRadius = 6371000;
-  const fromLat = toRadians(from.lat);
-  const toLat = toRadians(to.lat);
-  const deltaLat = toRadians(to.lat - from.lat);
-  const deltaLon = toRadians(to.lon - from.lon);
-  const a = Math.sin(deltaLat / 2) ** 2 + Math.cos(fromLat) * Math.cos(toLat) * Math.sin(deltaLon / 2) ** 2;
-  return 2 * earthRadius * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
-}
-
-function toRadians(degrees) {
-  return degrees * Math.PI / 180;
 }
 
 function undoRoute() {
@@ -4078,11 +3653,43 @@ async function initApp() {
     selectionTitle.textContent = "\u6b63\u5728\u542f\u52a8 Leaflet Canvas";
     selectionHint.textContent = "\u6b63\u5728\u8bfb\u53d6\u672c\u5730 GeoJSON \u548c\u57ce\u5e02\u5750\u6807\u6570\u636e...";
     await loadMapData();
-    initMap();
+    mapController = createMapController({
+      L: window.L,
+      state,
+      elements: {
+        mapTarget: "travelMap",
+        appShell,
+        mobileViewButtons,
+        exitCityViewBtn
+      },
+      callbacks: {
+        queueCityClick,
+        enterCityView,
+        cancelQueuedCityClick,
+        renderPanel,
+        routeMetricsUpdated: () => {
+          renderPanel();
+          persistTripState();
+        }
+      },
+      helpers: {
+        normalizeKey,
+        escapeHtml,
+        articleCountForCity,
+        cityById,
+        placeById,
+        hasCoordinates,
+        transportProfile: (mode) => ({
+          ...transportProfile(mode),
+          mode: transportProfiles[mode] ? mode : "highspeed"
+        })
+      }
+    });
+    mapController.init();
     const initialRecovery = restoreTripState();
     shouldRetryTripRestoreAfterCountyHydration = initialRecovery.status === "deferred";
-    setMobileView("plan");
-    renderRoutes();
+    mapController.setMobileView("plan");
+    mapController.renderRoutes();
     renderPanel();
     document.documentElement.dataset.appReady = "map";
     scheduleIdle(() => {
@@ -4114,7 +3721,7 @@ if (exportHtmlBtn) exportHtmlBtn.addEventListener("click", exportPrintableHtmlGu
 exitCityViewBtn.addEventListener("click", () => exitCityView());
 transportButtons.forEach((button) => button.addEventListener("click", () => setTransportMode(button.dataset.mode)));
 paceButtons.forEach((button) => button.addEventListener("click", () => setTripPace(button.dataset.pace)));
-mobileViewButtons.forEach((button) => button.addEventListener("click", () => setMobileView(button.dataset.mobileView)));
+mobileViewButtons.forEach((button) => button.addEventListener("click", () => mapController?.setMobileView(button.dataset.mobileView)));
 if (tripNameInput) tripNameInput.addEventListener("change", updateTripNameMetadata);
 if (tripStartDateInput) tripStartDateInput.addEventListener("change", updateTripStartDateMetadata);
 if (autoScheduleBtn) autoScheduleBtn.addEventListener("click", autoScheduleCurrentTrip);
