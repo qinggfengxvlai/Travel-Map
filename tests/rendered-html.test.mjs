@@ -36,6 +36,20 @@ const tripItemFormNames = [
   "note"
 ];
 
+function functionSource(source, name) {
+  const signature = new RegExp(`(?:async\\s+)?function\\s+${name}\\s*\\(`);
+  const start = source.search(signature);
+  assert.notEqual(start, -1, `expected ${name} function`);
+  const bodyStart = source.indexOf("{", start);
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}") depth -= 1;
+    if (depth === 0) return source.slice(start, index + 1);
+  }
+  assert.fail(`expected complete ${name} function body`);
+}
+
 test("static page exposes each calendar planner control exactly once", async () => {
   const html = await readFile(htmlUrl, "utf8");
 
@@ -134,19 +148,62 @@ test("app coordinates TripPlan through the calendar modules and one commit entry
   assert.match(app, /function\s+syncRoutesFromTripPlan\s*\(/);
 });
 
-test("app keeps city planning available when the prefecture boundary file is unavailable", async () => {
+test("app renders critical map data before hydrating optional summaries", async () => {
   const app = await readFile(appUrl, "utf8");
 
-  assert.match(app, /china-prefectures-lite-\$\{index \+ 1\}\.json/);
-  assert.match(app, /Promise\.all\s*\(\s*prefectureBoundaryPaths\.map/);
-  assert.match(app, /loadOptionalJson\s*\(\s*path,\s*\{\s*timeoutMs:\s*20000\s*\}\s*\)/);
   assert.match(
     app,
-    /const\s+validMapData\s*=\s*\{[\s\S]*?type:\s*["']FeatureCollection["'][\s\S]*?mapChunks\.flatMap/
+    /import\s*\{[\s\S]*?createJsonLoader[\s\S]*?createDeferredDataLoaders[\s\S]*?loadCriticalMapData[\s\S]*?scheduleIdle[\s\S]*?\}\s*from\s*["']\.\/app-data\.js["']/
   );
+
+  const loadMapData = functionSource(app, "loadMapData");
+  assert.match(loadMapData, /await\s+loadCriticalMapData\s*\(\s*\{\s*loadJson\s*\}\s*\)/);
+  assert.match(loadMapData, /hydrateFoodArticles\s*\(\s*null\s*\)/);
+  assert.doesNotMatch(loadMapData, /Promise\.all|prefectureBoundaryPaths|counties-summary|wechat-food-summary|loadCountySummary|loadFoodSummary/);
+
+  const deferredHydration = functionSource(app, "hydrateDeferredSummaries");
+  assert.match(deferredHydration, /loadCountySummary\s*\(/);
+  assert.match(deferredHydration, /loadFoodSummary\s*\(/);
+  assert.match(deferredHydration, /Promise\.all\s*\(/);
+  assert.match(deferredHydration, /mergeCountyRecords\s*\(/);
+  assert.match(
+    deferredHydration,
+    /shouldRetryTripRestoreAfterCountyHydration\s*&&\s*!state\.tripPlan[\s\S]*?restoreTripState\s*\(/
+  );
+  assert.match(deferredHydration, /updateSearchResults\s*\(/);
+  assert.match(deferredHydration, /renderFoodPanel\s*\(/);
+  assert.match(deferredHydration, /renderPanel\s*\(/);
+  assert.equal((app.match(/loadCountySummary\s*\(/g) ?? []).length, 1);
+  assert.equal((app.match(/loadFoodSummary\s*\(/g) ?? []).length, 1);
+
+  const initApp = functionSource(app, "initApp");
+  const startupSteps = [
+    "await loadMapData()",
+    "initMap()",
+    "restoreTripState()",
+    'setMobileView("plan")',
+    "renderRoutes()",
+    "renderPanel()",
+    'document.documentElement.dataset.appReady = "map"',
+    "scheduleIdle("
+  ];
+  let previousIndex = -1;
+  for (const step of startupSteps) {
+    const index = initApp.indexOf(step);
+    assert.ok(index > previousIndex, `expected ${step} after the previous startup step`);
+    previousIndex = index;
+  }
+  assert.match(initApp, /hydrateDeferredSummaries\s*\(\s*\)[\s\S]*?finally\s*\([\s\S]*?dataset\.appReady\s*=\s*["']complete["']/);
+  assert.match(initApp, /shouldRetryTripRestoreAfterCountyHydration\s*=\s*!state\.tripPlan/);
+  assert.match(app, /failedBoundaryPaths:\s*\[\]/);
+  assert.match(loadMapData, /state\.failedBoundaryPaths\s*=/);
+  assert.match(initApp, /state\.failedBoundaryPaths\.length[\s\S]*?showBoundaryLoadHint\s*\(/);
+
   assert.match(app, /if\s*\(\s*bounds\.isValid\s*\(\s*\)\s*\)/);
   assert.match(app, /L\.latLngBounds\s*\(\s*state\.cities\.map/);
   assert.doesNotMatch(app, /throw new Error\s*\(\s*["']china-prefectures data is empty["']\s*\)/);
+  assert.match(app, /loadOptionalJson\s*\(\s*`\.\/data\/counties\/by-city\/\$\{cityId\}\.json`/);
+  assert.match(app, /loadOptionalJson\s*\(\s*`\.\/data\/food-articles\/by-city\/\$\{cityId\}\.json`/);
 });
 
 test("lightweight prefecture boundaries retain every city within the startup budget", async () => {

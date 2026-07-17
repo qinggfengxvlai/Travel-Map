@@ -45,8 +45,16 @@ import {
   renderTripEditorMarkup,
   restoreTripEditorFocus
 } from "./trip-editor.js";
+import {
+  createJsonLoader,
+  createDeferredDataLoaders,
+  loadCriticalMapData,
+  scheduleIdle
+} from "./app-data.js";
 
 const tripArchiveStorage = createLazyStorageAdapter(() => window.localStorage);
+const { loadJson, loadOptionalJson } = createJsonLoader();
+const deferredData = createDeferredDataLoaders({ loadOptionalJson });
 
 const labels = {
   chooseStart: "\u9009\u62e9\u51fa\u53d1\u57ce\u5e02",
@@ -120,6 +128,7 @@ const DEFAULT_TRIP_NAME = "\u6211\u7684\u65c5\u884c";
 let legacyTripBackupPending = false;
 let lastTripPersistenceResult = { stored: false, hashCleared: true };
 let emergencyLegacyTripRaw = null;
+let shouldRetryTripRestoreAfterCountyHydration = false;
 
 const landmarkCatalog = {
   beijing: [
@@ -520,7 +529,8 @@ const state = {
   cities: [],
   counties: [],
   hiddenMunicipalityChildren: [],
-  mapData: null
+  mapData: null,
+  failedBoundaryPaths: []
 };
 
 const selectionTitle = document.querySelector("#selectionTitle");
@@ -577,52 +587,9 @@ const paceButtons = Array.from(document.querySelectorAll("[data-pace]"));
 const exitCityViewBtn = document.querySelector("#exitCityViewBtn");
 const mapBadgeLabel = document.querySelector(".map-badge span");
 
-async function loadJson(path, options = {}) {
-  const response = await fetch(`${path}?v=landmark-poi-4`, {
-    cache: "no-store",
-    signal: options.signal
-  });
-  if (!response.ok) throw new Error(`${path} HTTP ${response.status}`);
-  return response.json();
-}
-
-async function loadOptionalJson(path, options = {}) {
-  const controller = options.timeoutMs ? new AbortController() : null;
-  const timeoutId = controller
-    ? window.setTimeout(() => controller.abort(), options.timeoutMs)
-    : null;
-  try {
-    return await loadJson(path, { signal: controller ? controller.signal : undefined });
-  } catch (error) {
-    if (!options.quiet) console.warn("optional data unavailable", path, error);
-    return null;
-  } finally {
-    if (timeoutId !== null) window.clearTimeout(timeoutId);
-  }
-}
-
 async function loadMapData() {
-  const prefectureBoundaryPaths = Array.from(
-    { length: 8 },
-    (_, index) => `./data/china-prefectures-lite-${index + 1}.json`
-  );
-  const [mapChunks, cityData, countyData, foodData] = await Promise.all([
-    Promise.all(
-      prefectureBoundaryPaths.map((path) => loadOptionalJson(path, { timeoutMs: 20000 }))
-    ),
-    loadJson("./data/china-cities.json"),
-    loadOptionalJson("./data/counties-summary.json", { timeoutMs: 6000 }),
-    loadOptionalJson("./data/wechat-food-summary.json", { timeoutMs: 6000 })
-  ]);
-
-  const cities = cityData && cityData.cities ? cityData.cities : [];
-  const validMapData = {
-    type: "FeatureCollection",
-    features: mapChunks.flatMap((chunk) => (
-      chunk && Array.isArray(chunk.features) ? chunk.features : []
-    ))
-  };
-  if (!cities.length) throw new Error("china-cities data is empty");
+  const criticalData = await loadCriticalMapData({ loadJson });
+  const cities = criticalData.cities;
 
   const displayCities = cities
     .filter((city) => !municipalityNames.has(city.province) || city.name === city.province)
@@ -633,21 +600,47 @@ async function loadMapData() {
   displayCities.push({ ...taiwanRegion });
 
   state.hiddenMunicipalityChildren = cities.filter((city) => municipalityNames.has(city.province) && city.name !== city.province);
-  state.mapData = validMapData;
+  state.mapData = criticalData.mapData;
+  state.failedBoundaryPaths = criticalData.failedBoundaryPaths;
   state.cities = displayCities.map((city) => ({
     ...city,
     searchText: normalizeSearchText(`${city.name} ${city.province} ${city.pinyin}`)
   }));
-  state.counties = [
-    ...(countyData && countyData.counties ? countyData.counties : []),
-    ...buildMunicipalityCountyEntries(state.hiddenMunicipalityChildren, state.cities)
-  ].map(normalizeCountyRecord);
+  state.counties = buildMunicipalityCountyEntries(
+    state.hiddenMunicipalityChildren,
+    state.cities
+  ).map(normalizeCountyRecord);
+  rebuildPlaceIndexes();
+  hydrateFoodArticles(null);
+}
+
+function rebuildPlaceIndexes() {
   state.cityById = new Map(state.cities.map((city) => [city.id, city]));
   state.placeById = buildPlaceMap(state.cities, state.counties);
   state.cityByKey = buildCityKeyMap(state.cities, state.hiddenMunicipalityChildren);
   state.cityByProvinceKey = buildCityProvinceKeyMap(state.cities, state.hiddenMunicipalityChildren);
   state.cityKeyEntries = Array.from(state.cityByKey.entries()).sort((a, b) => b[0].length - a[0].length);
+}
+
+async function hydrateDeferredSummaries() {
+  const countyRequest = deferredData.loadCountySummary();
+  const foodRequest = deferredData.loadFoodSummary();
+  const [countyData, foodData] = await Promise.all([countyRequest, foodRequest]);
+
+  if (countyData && Array.isArray(countyData.counties)) {
+    mergeCountyRecords(countyData.counties);
+    rebuildPlaceIndexes();
+    if (shouldRetryTripRestoreAfterCountyHydration && !state.tripPlan) {
+      shouldRetryTripRestoreAfterCountyHydration = false;
+      restoreTripState();
+    }
+  }
+
   hydrateFoodArticles(foodData);
+  updateSearchResults();
+  renderFoodPanel();
+  renderPanel();
+  if (state.failedBoundaryPaths.length) showBoundaryLoadHint();
 }
 
 function hydrateFoodArticles(foodData) {
@@ -4105,6 +4098,13 @@ function timestampForFile() {
   return new Date().toISOString().replace(/[:.]/g, "-");
 }
 
+function showBoundaryLoadHint() {
+  const failedCount = state.failedBoundaryPaths.length;
+  if (!failedCount) return;
+  selectionHint.dataset.boundaryLoad = "partial";
+  selectionHint.textContent = `${selectionHint.textContent} \u90e8\u5206\u5730\u56fe\u8fb9\u754c\u6682\u672a\u52a0\u8f7d\uff08${failedCount} \u4e2a\u5206\u5757\uff09\uff0c\u57ce\u5e02\u884c\u7a0b\u89c4\u5212\u4ecd\u53ef\u6b63\u5e38\u4f7f\u7528\u3002`;
+}
+
 async function initApp() {
   try {
     selectionTitle.textContent = "\u6b63\u5728\u542f\u52a8 Leaflet Canvas";
@@ -4112,9 +4112,19 @@ async function initApp() {
     await loadMapData();
     initMap();
     restoreTripState();
+    shouldRetryTripRestoreAfterCountyHydration = !state.tripPlan;
     setMobileView("plan");
     renderRoutes();
     renderPanel();
+    if (state.failedBoundaryPaths.length) showBoundaryLoadHint();
+    document.documentElement.dataset.appReady = "map";
+    scheduleIdle(() => {
+      hydrateDeferredSummaries()
+        .catch((error) => console.warn("deferred summaries unavailable", error))
+        .finally(() => {
+          document.documentElement.dataset.appReady = "complete";
+        });
+    });
   } catch (error) {
     console.error(error);
     selectionTitle.textContent = "\u5730\u56fe\u6e32\u67d3\u542f\u52a8\u5931\u8d25";
