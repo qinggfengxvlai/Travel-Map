@@ -53,9 +53,7 @@ import {
   createJsonLoader,
   createDeferredDataLoaders,
   isCountyRecordsPayload,
-  isFoodArticlesPayload,
   loadCriticalMapData,
-  mergeProgressiveFoodArticles,
   scheduleIdle
 } from "./app-data.js";
 import {
@@ -72,6 +70,38 @@ const { loadJson, loadOptionalJson } = createJsonLoader();
 const deferredData = createDeferredDataLoaders({ loadOptionalJson });
 let placeIndex = null;
 let mapController = null;
+let foodModulePromise;
+let foodControllerPromise;
+let foodController = null;
+let foodModuleFailureReported = false;
+
+function loadFoodModule() {
+  foodModulePromise ||= import("./food-content.js");
+  return foodModulePromise;
+}
+
+function loadFoodController() {
+  foodControllerPromise ||= loadFoodModule().then(({ createFoodController }) => {
+    foodController = createFoodController({
+      state,
+      elements: {
+        document,
+        foodArticleCount,
+        foodArticleList,
+        foodEmptyState
+      },
+      data: { loadOptionalJson },
+      helpers: {
+        normalizeSearchText,
+        escapeHtml,
+        hasCoordinates,
+        location: window.location
+      }
+    });
+    return foodController;
+  });
+  return foodControllerPromise;
+}
 
 const labels = {
   chooseStart: "\u9009\u62e9\u51fa\u53d1\u57ce\u5e02",
@@ -495,14 +525,8 @@ const state = {
   metroNetworkPromise: null,
   passengerStationNames: null,
   passengerStationNamesPromise: null,
-  foodArticles: [],
-  foodArticleById: new Map(),
-  foodArticlesByCity: new Map(),
-  foodArticlesByPlace: new Map(),
   loadedCountyCityIds: new Set(),
   countyLoadPromises: new Map(),
-  loadedFoodArticleCityIds: new Set(),
-  foodArticleLoadPromises: new Map(),
   searchResults: [],
   featureCityIds: new WeakMap(),
   cities: [],
@@ -590,7 +614,6 @@ async function loadMapData() {
     municipalityChildren: state.hiddenMunicipalityChildren
   });
   syncPlaceIndex();
-  hydrateFoodArticles(null);
 }
 
 function syncPlaceIndex() {
@@ -601,6 +624,11 @@ function syncPlaceIndex() {
   state.cityByKey = placeIndex.cityByKey;
   state.cityByProvinceKey = placeIndex.cityByProvinceKey;
   state.cityKeyEntries = placeIndex.cityKeyEntries;
+  if (foodControllerPromise) {
+    void foodControllerPromise
+      .then((controller) => controller.refreshKnownPlaces(state.placeById))
+      .catch(reportFoodModuleFailure);
+  }
 }
 
 async function hydrateDeferredSummaries() {
@@ -622,80 +650,28 @@ async function hydrateDeferredSummaries() {
     }
   }
 
-  if (status.foodValid) hydrateFoodArticles(foodData);
+  let foodProcessingError = null;
+  if (status.foodValid) {
+    try {
+      const controller = await loadFoodController();
+      controller.refreshKnownPlaces(state.placeById);
+      controller.hydrateSummary(foodData);
+    } catch (error) {
+      foodProcessingError = error;
+    }
+  }
   updateSearchResults();
-  renderFoodPanel();
   renderPanel();
-  if (countyResult.status === "rejected" || foodResult.status === "rejected") {
+  if (countyResult.status === "rejected" || foodResult.status === "rejected" || foodProcessingError) {
     throw new AggregateError(
       [countyResult, foodResult]
         .filter((result) => result.status === "rejected")
-        .map((result) => result.reason),
+        .map((result) => result.reason)
+        .concat(foodProcessingError ? [foodProcessingError] : []),
       "deferred summary loading failed"
     );
   }
   return status;
-}
-
-function hydrateFoodArticles(foodData) {
-  if (!isFoodArticlesPayload(foodData)) return [];
-  return mergeFoodArticleRecords(foodData.articles, { incomingSource: "summary" });
-}
-
-function rebuildFoodArticleIndexes() {
-  state.foodArticleById = new Map(state.foodArticles.map((article) => [article.id, article]));
-  state.foodArticlesByCity = groupArticlesBy("cityId");
-  state.foodArticlesByPlace = groupArticlesBy("placeId");
-  enrichPlaceSearchTextWithArticles();
-}
-
-function normalizeFoodArticleRecord(article) {
-  return {
-    ...article,
-    searchText: article.searchText || normalizeSearchText(`${article.title} ${article.description} ${article.cityName} ${article.countyName} ${(article.foods || []).join(" ")}`)
-  };
-}
-
-function mergeFoodArticleRecords(articles, { incomingSource = "city" } = {}) {
-  if (!Array.isArray(articles) || !articles.length) return [];
-  const knownPlaces = state.placeById;
-  const normalized = articles
-    .filter((article) => knownPlaces.has(article.placeId) || knownPlaces.has(article.cityId))
-    .map(normalizeFoodArticleRecord);
-  state.foodArticles = mergeProgressiveFoodArticles(
-    state.foodArticles,
-    normalized,
-    { incomingSource }
-  ).sort((a, b) => Number(a.day || 0) - Number(b.day || 0));
-  rebuildFoodArticleIndexes();
-  const mergedIds = new Set(normalized.map((article) => article.id));
-  return state.foodArticles.filter((article) => mergedIds.has(article.id));
-}
-
-function groupArticlesBy(field) {
-  const map = new Map();
-  state.foodArticles.forEach((article) => {
-    const key = article[field];
-    if (!key) return;
-    if (!map.has(key)) map.set(key, []);
-    map.get(key).push(article);
-  });
-  return map;
-}
-
-function enrichPlaceSearchTextWithArticles() {
-  const appendArticleText = (place) => {
-    const cityArticles = articlesForCity(place.id);
-    const placeArticles = articlesForPlace(place.id);
-    const articles = place.placeType === "county" ? placeArticles : cityArticles;
-    if (!articles.length) return;
-    const articleText = articles
-      .flatMap((article) => [article.title, article.description, ...(article.foods || [])])
-      .join(" ");
-    place.searchText = `${place.searchText} ${normalizeSearchText(articleText)}`;
-  };
-  state.cities.forEach(appendArticleText);
-  state.counties.forEach(appendArticleText);
 }
 
 function updateSearchResults() {
@@ -735,7 +711,7 @@ function updateSearchResults() {
 }
 
 function searchResultHtml(item) {
-  const articleCount = articleCountForPlace(item.id) || articleCountForCity(item.searchType === "county" ? item.parentCityId : item.id);
+  const articleCount = foodArticleCountForPlace(item.id) || foodArticleCountForCity(item.searchType === "county" ? item.parentCityId : item.id);
   const articleBadge = articleCount ? `<em>${articleCount} \u7bc7\u98df\u884c\u8bb0</em>` : "";
   const typeLabel = item.searchType === "county" ? "\u533a\u53bf" : "\u57ce\u5e02";
   if (item.searchType === "county") {
@@ -1303,6 +1279,57 @@ function renderOperationalWarnings() {
   selectionHint.textContent = [state.panelBaseHint, ...warnings].filter(Boolean).join(" ");
 }
 
+function currentFoodSelection() {
+  return {
+    selected: state.selectedCityId ? placeById(state.selectedCityId) : null,
+    viewMode: state.viewMode,
+    activeCityViewId: state.activeCityViewId
+  };
+}
+
+function reportFoodModuleFailure(error) {
+  if (foodModuleFailureReported) return;
+  foodModuleFailureReported = true;
+  if (foodArticleCount) foodArticleCount.textContent = "暂不可用";
+  applyDeferredInternalFailure(error);
+}
+
+function queueFoodPanelRender() {
+  if (!document.documentElement.dataset.appReady) return;
+  const selection = currentFoodSelection();
+  void loadFoodController()
+    .then((controller) => controller.renderPanel(selection))
+    .catch(reportFoodModuleFailure);
+}
+
+function foodArticleCountForCity(cityId) {
+  return foodController?.articleCountForCity(cityId) || 0;
+}
+
+function foodArticleCountForPlace(placeId) {
+  return foodController?.articleCountForPlace(placeId) || 0;
+}
+
+async function loadFoodForCity(cityId, options) {
+  try {
+    const controller = await loadFoodController();
+    await controller.ensureCity(cityId, options);
+    return controller;
+  } catch (error) {
+    reportFoodModuleFailure(error);
+    return null;
+  }
+}
+
+async function ensureFoodModuleForTrip() {
+  try {
+    return await loadFoodController();
+  } catch (error) {
+    reportFoodModuleFailure(error);
+    return null;
+  }
+}
+
 function renderPanel() {
   const selected = placeById(state.selectedCityId);
   syncTransportButtons();
@@ -1364,7 +1391,7 @@ function renderPanel() {
   updateTotals();
   chainLabel.textContent = buildChainLabel();
   renderTripPlanner();
-  renderFoodPanel();
+  queueFoodPanelRender();
 }
 
 function renderTripPlanner() {
@@ -1684,7 +1711,7 @@ function placeHighlightText(place, limit = 3) {
 function dayFoodText(day) {
   const sections = dayRecommendationPlaces(day)
     .map((place) => {
-      const foods = uniqueByName(foodSuggestionsForPlace(place)).slice(0, 4);
+      const foods = uniqueByName(currentFoodSuggestionsFor(place)).slice(0, 4);
       return foods.length ? `${place.name}\uff1a${foods.join("\u3001")}` : "";
     })
     .filter(Boolean)
@@ -1693,14 +1720,13 @@ function dayFoodText(day) {
   return "\u6682\u65e0\u5df2\u5339\u914d\u98df\u884c\u8bb0\uff0c\u53ef\u5148\u5c06\u665a\u9910\u7559\u7ed9\u5f53\u5730\u5c0f\u5403\u8857\u6216\u8f66\u7ad9\u5468\u8fb9\u3002";
 }
 
-function foodSuggestionsForPlace(place) {
+function currentFoodSuggestionsFor(place) {
   const city = cityForPlace(place);
-  const articles = place?.placeType === "county" ? articlesForPlace(place.id) : articlesForCity(city?.id);
-  return (articles || []).slice(0, 3).flatMap((article) => (article.foods || []).slice(0, 3));
+  return foodController?.suggestionsForPlace(place, city) || [];
 }
 
 function placeFoodText(place, limit = 5) {
-  return uniqueByName(foodSuggestionsForPlace(place)).slice(0, limit).join("\u3001");
+  return uniqueByName(currentFoodSuggestionsFor(place)).slice(0, limit).join("\u3001");
 }
 
 function dayLodgingText(day) {
@@ -2354,9 +2380,9 @@ async function loadCityDetail(city, detailSession) {
   const isCurrent = () => mapController?.isDetailSessionCurrent(detailSession);
   if (!isCurrent()) return false;
   mapController.clearCityDetail();
-  await Promise.all([
+  const [, cityFoodController] = await Promise.all([
     ensureCityCounties(city.id, { isCurrent }),
-    ensureCityFoodArticles(city.id, { isCurrent })
+    loadFoodForCity(city.id, { isCurrent })
   ]);
   if (!isCurrent()) return false;
 
@@ -2385,7 +2411,7 @@ async function loadCityDetail(city, detailSession) {
   if (!isCurrent()) return false;
   const subwayStations = await resolveCitySubwayStations(city, queryBounds, boundaryData, metroNetwork, { isCurrent });
   if (!isCurrent()) return false;
-  const foodArticles = articlesForCity(city.id);
+  const foodArticles = cityFoodController?.articlesForCity(city.id) || [];
   return mapController.renderCityDetail({
     session: detailSession,
     city,
@@ -2401,7 +2427,7 @@ async function loadCityDetail(city, detailSession) {
     stations,
     metroLines: metroNetwork.lines || [],
     subwayStations,
-    foodMarkers: foodArticleMarkerDescriptors(foodArticles),
+    foodMarkers: cityFoodController?.renderMarkers(foodArticles) || [],
     foodArticleCount: foodArticles.length
   });
 }
@@ -3043,16 +3069,8 @@ function cityDetailCounts(city) {
     landmarks: state.activeLandmarkCount || cityLandmarks(city).length,
     stations: state.activeStationCount,
     subwayStations: state.activeSubwayStationCount,
-    foodArticles: articleCountForCity(city.id)
+    foodArticles: foodArticleCountForCity(city.id)
   };
-}
-
-function articlesForCity(cityId) {
-  return state.foodArticlesByCity.get(cityId) || [];
-}
-
-function articlesForPlace(placeId) {
-  return state.foodArticlesByPlace.get(placeId) || [];
 }
 
 async function ensureCityCounties(cityId, { isCurrent = () => true } = {}) {
@@ -3070,126 +3088,6 @@ async function ensureCityCounties(cityId, { isCurrent = () => true } = {}) {
   syncPlaceIndex();
   state.loadedCountyCityIds.add(cityId);
   return counties;
-}
-
-async function ensureCityFoodArticles(cityId, { isCurrent = () => true } = {}) {
-  if (!cityId || state.loadedFoodArticleCityIds.has(cityId)) return articlesForCity(cityId);
-  if (!state.foodArticleLoadPromises.has(cityId)) {
-    const request = loadOptionalJson(`./data/food-articles/by-city/${cityId}.json`, { quiet: true })
-      .finally(() => state.foodArticleLoadPromises.delete(cityId));
-    state.foodArticleLoadPromises.set(cityId, request);
-  }
-  const data = await state.foodArticleLoadPromises.get(cityId);
-  if (!isCurrent()) return articlesForCity(cityId);
-  if (!isFoodArticlesPayload(data)) return articlesForCity(cityId);
-  const articles = data.articles;
-  mergeFoodArticleRecords(articles, { incomingSource: "city" });
-  state.loadedFoodArticleCityIds.add(cityId);
-  return articles;
-}
-
-function articleCountForCity(cityId) {
-  return articlesForCity(cityId).length;
-}
-
-function articleCountForPlace(placeId) {
-  return articlesForPlace(placeId).length;
-}
-
-function selectedFoodArticles() {
-  const selected = state.selectedCityId ? placeById(state.selectedCityId) : null;
-  if (selected && selected.placeType === "county") return articlesForPlace(selected.id);
-  if (selected && selected.placeType === "city") return articlesForCity(selected.id);
-  if (state.viewMode === "city" && state.activeCityViewId) return articlesForCity(state.activeCityViewId);
-  return [];
-}
-
-function renderFoodPanel() {
-  if (!foodArticleList || !foodArticleCount || !foodEmptyState) return;
-  const articles = selectedFoodArticles();
-  foodArticleCount.textContent = `${articles.length} 篇`;
-  foodArticleList.replaceChildren();
-  foodEmptyState.hidden = articles.length > 0;
-
-  articles.slice(0, 8).forEach((article) => {
-    const card = document.createElement("article");
-    card.className = "food-card";
-    const readerPath = articleReaderPath(article);
-    const coverImage = articleCoverImage(article);
-    const cover = coverImage
-      ? `<img src="${escapeHtml(coverImage)}" alt="" loading="lazy" />`
-      : `<span class="food-card-placeholder">食</span>`;
-    card.innerHTML = `
-      <a class="food-card-media" href="${escapeHtml(readerPath)}" target="_blank" rel="noopener">${cover}</a>
-      <div class="food-card-body">
-        <p>${article.day ? `第 ${article.day} 天` : "食行记"} · ${escapeHtml(article.locationText || article.cityName)}</p>
-        <h3><a href="${escapeHtml(readerPath)}" target="_blank" rel="noopener">${escapeHtml(article.title)}</a></h3>
-        <span>${escapeHtml((article.foods || []).slice(0, 5).join("、") || article.description)}</span>
-      </div>
-    `;
-    foodArticleList.append(card);
-  });
-}
-
-function foodArticleMarkerDescriptors(articles) {
-  const markerArticles = articles.filter(hasCoordinates);
-  const placeOffsets = new Map();
-  return markerArticles.map((article) => {
-    const offsetIndex = placeOffsets.get(article.placeId) || 0;
-    placeOffsets.set(article.placeId, offsetIndex + 1);
-    const offset = foodMarkerOffset(offsetIndex);
-    return {
-      title: article.title,
-      lat: Number(article.lat) + offset.lat,
-      lon: Number(article.lon) + offset.lon,
-      popupHtml: foodArticlePopupHtml(article)
-    };
-  });
-}
-
-function foodMarkerOffset(index) {
-  if (!index) return { lat: 0, lon: 0 };
-  const angle = index * 1.9;
-  const radius = Math.min(0.035, 0.006 + index * 0.0025);
-  return {
-    lat: Math.sin(angle) * radius,
-    lon: Math.cos(angle) * radius
-  };
-}
-
-function foodArticlePopupHtml(article) {
-  const readerPath = articleReaderPath(article);
-  const coverImage = articleCoverImage(article);
-  const cover = coverImage
-    ? `<img class="food-popup-cover" src="${escapeHtml(coverImage)}" alt="" loading="lazy" />`
-    : "";
-  const foods = (article.foods || []).slice(0, 8).map((food) => `<span>${escapeHtml(food)}</span>`).join("");
-  return `
-    <article class="food-popup">
-      ${cover}
-      <p class="food-popup-kicker">${article.day ? `第 ${article.day} 天` : "食行记"} · ${escapeHtml(article.locationText || article.cityName)}</p>
-      <h3>${escapeHtml(article.title)}</h3>
-      <p>${escapeHtml(article.description || "")}</p>
-      <div class="food-tags">${foods}</div>
-      <div class="food-popup-actions">
-        <a href="${escapeHtml(readerPath)}" target="_blank" rel="noopener">${article.pdfPath ? "打开 PDF" : "打开图文页"}</a>
-        ${article.url ? `<a href="${escapeHtml(article.url)}" target="_blank" rel="noopener">原文</a>` : ""}
-      </div>
-    </article>
-  `;
-}
-
-function articleReaderPath(article) {
-  if (!shouldUseLocalArticleAssets() && article.url) return article.url;
-  return article.readerPath || article.pdfPath || article.htmlPath || article.markdownPath || article.url || "#";
-}
-
-function articleCoverImage(article) {
-  return shouldUseLocalArticleAssets() ? article.coverImage : "";
-}
-
-function shouldUseLocalArticleAssets() {
-  return ["", "localhost", "127.0.0.1"].includes(window.location.hostname);
 }
 
 function transportProfile(mode = state.transportMode) {
@@ -3380,12 +3278,13 @@ function guideFileName(plan, extension) {
   return `${safeTripNameForFile(plan?.name)}-${timestampForFile()}.${extension}`;
 }
 
-function exportMarkdownGuide() {
+async function exportMarkdownGuide() {
   if (!Array.isArray(state.tripPlan?.days) || !state.tripPlan.days.length) {
     updateArchiveStatus("\u5f53\u524d\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u65e5\u5386\u884c\u7a0b\u3002", "error");
     return;
   }
   try {
+    await ensureFoodModuleForTrip();
     const plan = state.tripPlan;
     const model = buildCurrentGuideModel();
     const markdown = buildMarkdownGuide(model);
@@ -3398,12 +3297,13 @@ function exportMarkdownGuide() {
   }
 }
 
-function exportPrintableHtmlGuide() {
+async function exportPrintableHtmlGuide() {
   if (!Array.isArray(state.tripPlan?.days) || !state.tripPlan.days.length) {
     updateArchiveStatus("\u5f53\u524d\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u65e5\u5386\u884c\u7a0b\u3002", "error");
     return;
   }
   try {
+    await ensureFoodModuleForTrip();
     const plan = state.tripPlan;
     const model = buildCurrentGuideModel();
     const html = buildPrintableHtml(model);
@@ -3496,7 +3396,7 @@ async function initApp() {
       helpers: {
         normalizeKey,
         escapeHtml,
-        articleCountForCity,
+        articleCountForCity: foodArticleCountForCity,
         cityById,
         placeById,
         hasCoordinates,
@@ -3513,6 +3413,7 @@ async function initApp() {
     mapController.renderRoutes();
     renderPanel();
     document.documentElement.dataset.appReady = "map";
+    queueFoodPanelRender();
     scheduleIdle(() => {
       hydrateDeferredSummaries()
         .then((status) => applyDeferredReadiness(status))

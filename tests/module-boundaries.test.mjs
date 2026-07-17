@@ -4,6 +4,20 @@ import test from "node:test";
 
 const mapCoreUrl = new URL("../public/static-site/map-core.js", import.meta.url);
 const appUrl = new URL("../public/static-site/app.js", import.meta.url);
+const foodContentUrl = new URL("../public/static-site/food-content.js", import.meta.url);
+
+test("food ownership lives behind one memoized dynamic import", async () => {
+  const appSource = await readFile(appUrl, "utf8");
+  const appDataSource = await readFile(new URL("../public/static-site/app-data.js", import.meta.url), "utf8");
+
+  await access(foodContentUrl);
+  assert.equal((appSource.match(/import\(\s*["']\.\/food-content\.js["']\s*\)/g) ?? []).length, 1);
+  assert.match(appSource, /foodModulePromise\s*\|\|=\s*import\(\s*["']\.\/food-content\.js["']\s*\)/);
+  assert.doesNotMatch(appSource, /(?:^|\n)import[\s\S]*?from\s*["']\.\/food-content\.js["']/);
+  assert.doesNotMatch(appSource, /function\s+(?:renderFoodPanel|foodArticlePopupHtml|normalizeFoodArticleRecord|mergeFoodArticleRecords|groupArticlesBy)\s*\(/);
+  assert.doesNotMatch(appSource, /wechat-food-summary\.json/);
+  assert.match(appDataSource, /wechat-food-summary\.json/, "app-data may retain deferred source ownership");
+});
 
 test("Leaflet ownership lives in the public map-core module", async () => {
   await access(mapCoreUrl);

@@ -5,6 +5,7 @@ import { readFile } from "node:fs/promises";
 const htmlUrl = new URL("../public/static-site/index.html", import.meta.url);
 const appUrl = new URL("../public/static-site/app.js", import.meta.url);
 const mapCoreUrl = new URL("../public/static-site/map-core.js", import.meta.url);
+const foodContentUrl = new URL("../public/static-site/food-content.js", import.meta.url);
 const stylesUrl = new URL("../public/static-site/styles.css", import.meta.url);
 const packageUrl = new URL("../package.json", import.meta.url);
 const litePrefectureUrls = Array.from(
@@ -235,6 +236,7 @@ test("app coordinates TripPlan through the calendar modules and one commit entry
 test("app renders critical map data before hydrating optional summaries", async () => {
   const app = await readFile(appUrl, "utf8");
   const mapCore = await readFile(mapCoreUrl, "utf8");
+  const foodContent = await readFile(foodContentUrl, "utf8");
 
   assert.match(
     app,
@@ -255,7 +257,7 @@ test("app renders critical map data before hydrating optional summaries", async 
 
   const loadMapData = functionSource(app, "loadMapData");
   assert.match(loadMapData, /await\s+loadCriticalMapData\s*\(\s*\{\s*loadJson\s*\}\s*\)/);
-  assert.match(loadMapData, /hydrateFoodArticles\s*\(\s*null\s*\)/);
+  assert.doesNotMatch(loadMapData, /food/i, "critical map loading must not initialize deferred food code");
   assert.doesNotMatch(loadMapData, /Promise\.all|prefectureBoundaryPaths|counties-summary|wechat-food-summary|loadCountySummary|loadFoodSummary/);
 
   const deferredHydration = functionSource(app, "hydrateDeferredSummaries");
@@ -268,7 +270,8 @@ test("app renders critical map data before hydrating optional summaries", async 
     /if\s*\(\s*shouldRetryTripRestoreAfterCountyHydration\s*\)[\s\S]*?restoreTripState\s*\(/
   );
   assert.match(deferredHydration, /updateSearchResults\s*\(/);
-  assert.match(deferredHydration, /renderFoodPanel\s*\(/);
+  assert.match(deferredHydration, /await\s+loadFoodController\s*\(\s*\)/);
+  assert.match(deferredHydration, /controller\.hydrateSummary\s*\(\s*foodData\s*\)/);
   assert.match(deferredHydration, /renderPanel\s*\(/);
   assert.equal((app.match(/loadCountySummary\s*\(/g) ?? []).length, 1);
   assert.equal((app.match(/loadFoodSummary\s*\(/g) ?? []).length, 1);
@@ -283,6 +286,7 @@ test("app renders critical map data before hydrating optional summaries", async 
     "mapController.renderRoutes()",
     "renderPanel()",
     'document.documentElement.dataset.appReady = "map"',
+    "queueFoodPanelRender()",
     "scheduleIdle("
   ];
   let previousIndex = -1;
@@ -306,7 +310,7 @@ test("app renders critical map data before hydrating optional summaries", async 
   assert.match(mapCore, /L\.latLngBounds\s*\(\s*state\.cities\.map/);
   assert.doesNotMatch(app, /throw new Error\s*\(\s*["']china-prefectures data is empty["']\s*\)/);
   assert.match(app, /loadOptionalJson\s*\(\s*`\.\/data\/counties\/by-city\/\$\{cityId\}\.json`/);
-  assert.match(app, /loadOptionalJson\s*\(\s*`\.\/data\/food-articles\/by-city\/\$\{cityId\}\.json`/);
+  assert.match(foodContent, /loadOptionalJson\s*\(\s*`\.\/data\/food-articles\/by-city\/\$\{cityId\}\.json`/);
 });
 
 test("app persists runtime district places through the place index overlay", async () => {
@@ -321,12 +325,12 @@ test("app persists runtime district places through the place index overlay", asy
 
 test("app wires deferred recovery, merge precedence, retryability and readiness policies", async () => {
   const app = await readFile(appUrl, "utf8");
+  const foodContent = await readFile(foodContentUrl, "utf8");
   const prepareMigration = functionSource(app, "prepareTripMigration");
   const restore = functionSource(app, "restoreTripState");
   const hydrate = functionSource(app, "hydrateDeferredSummaries");
   const ensureCounties = functionSource(app, "ensureCityCounties");
-  const ensureFood = functionSource(app, "ensureCityFoodArticles");
-  const hydrateFood = functionSource(app, "hydrateFoodArticles");
+  const ensureFood = functionSource(foodContent, "ensureCity");
   const commit = functionSource(app, "commitTripPlan");
   const init = functionSource(app, "initApp");
   const idleCallback = arrowCallCallbackSource(init, "scheduleIdle");
@@ -343,8 +347,8 @@ test("app wires deferred recovery, merge precedence, retryability and readiness 
   assert.doesNotMatch(init, /shouldRetryTripRestoreAfterCountyHydration\s*=\s*!state\.tripPlan/);
 
   assert.match(hydrate, /classifyDeferredSummaryData\s*\(/);
-  assert.match(hydrate, /hydrateFoodArticles\s*\(\s*foodData\s*\)/);
-  assert.match(hydrateFood, /incomingSource:\s*["']summary["']/);
+  assert.match(hydrate, /controller\.hydrateSummary\s*\(\s*foodData\s*\)/);
+  assert.match(foodContent, /store\.hydrate\s*\(\s*summary\.articles\s*,\s*\{\s*source:\s*["']summary["']/);
   assert.match(hydrate, /status\.countyValid/);
   assert.match(hydrate, /status\.foodValid/);
   assert.match(commit, /shouldRetryTripRestoreAfterCountyHydration\s*=\s*false/);
@@ -356,13 +360,13 @@ test("app wires deferred recovery, merge precedence, retryability and readiness 
   );
   assert.match(ensureCounties, /finally\s*\([\s\S]*?countyLoadPromises\.delete/);
 
-  assert.match(ensureFood, /if\s*\(\s*!isFoodArticlesPayload\s*\(\s*data\s*\)\s*\)\s*return\s+articlesForCity/);
-  assert.match(ensureFood, /incomingSource:\s*["']city["']/);
+  assert.match(ensureFood, /!validatePayload\s*\(\s*payload\s*\)/);
+  assert.match(ensureFood, /source:\s*["']city["']/);
   assert.ok(
-    ensureFood.indexOf("isFoodArticlesPayload(data)") < ensureFood.indexOf("loadedFoodArticleCityIds.add"),
+    ensureFood.indexOf("validatePayload(payload)") < ensureFood.indexOf("loadedCityIds.add"),
     "food payload validation must precede the loaded marker"
   );
-  assert.match(ensureFood, /finally\s*\([\s\S]*?foodArticleLoadPromises\.delete/);
+  assert.match(ensureFood, /finally\s*\([\s\S]*?cityLoadPromises\.delete/);
 
   assert.match(idleCallback, /applyDeferredReadiness\s*\(/);
   assert.match(idleCallback, /catch\s*\([\s\S]*?applyDeferredInternalFailure/);
