@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 import {
@@ -96,6 +97,45 @@ function fakePanelElements() {
     emptyState: { hidden: false }
   };
 }
+
+function controllerForHostname(hostname) {
+  return createFoodController({
+    state: { placeById: knownPlaces("hangzhou") },
+    helpers: { normalizeSearchText, location: { hostname } }
+  });
+}
+
+test("reader paths preserve safe same-origin summaries and safe external URL precedence", () => {
+  const production = controllerForHostname("travel.example.com");
+  const localhost = controllerForHostname("localhost");
+  const readerPath = "exports/wechat_articles/readers/food-1.html";
+  const externalUrl = "https://mp.weixin.qq.com/s/example";
+
+  assert.equal(production.articleReaderPath({ readerPath }), readerPath);
+  assert.equal(production.articleReaderPath({ readerPath, url: externalUrl }), externalUrl);
+  assert.equal(localhost.articleReaderPath({ readerPath, url: externalUrl }), readerPath);
+  assert.equal(production.articleReaderPath({ readerPath, url: "javascript:alert(1)" }), readerPath);
+  assert.equal(production.articleReaderPath({ readerPath: "../private.html" }), "#");
+  assert.equal(production.articleReaderPath({ readerPath: "//evil.example/reader", url: "data:text/html,bad" }), "#");
+  assert.equal(production.articleReaderPath({ readerPath: "javascript:alert(1)" }), "#");
+});
+
+test("production resolves a representative summary readerPath without an external URL", async () => {
+  const summaryPath = new URL("../public/static-site/data/wechat-food-summary.json", import.meta.url);
+  const summary = JSON.parse(await readFile(summaryPath, "utf8"));
+  const record = summary.articles.find((item) => item.readerPath && !item.url);
+  assert.ok(record, "fixture must include a summary-only reader path");
+
+  const places = knownPlaces(record.cityId, record.placeId);
+  const controller = createFoodController({
+    state: { placeById: places },
+    helpers: { normalizeSearchText, location: { hostname: "travel.example.com" } }
+  });
+  controller.hydrateSummary({ articles: [record] });
+
+  assert.equal(controller.articlesForCity(record.cityId)[0].id, record.id);
+  assert.equal(controller.articleReaderPath(record), record.readerPath);
+});
 
 test("controller retries invalid city chunks and renders safe local article assets and marker descriptors", async () => {
   const places = knownPlaces("hangzhou");

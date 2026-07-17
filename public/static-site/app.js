@@ -50,6 +50,7 @@ import {
 } from "./trip-editor.js";
 import {
   classifyDeferredSummaryData,
+  createLatestAsyncRefresh,
   createJsonLoader,
   createDeferredDataLoaders,
   isCountyRecordsPayload,
@@ -592,6 +593,11 @@ const transportButtons = Array.from(document.querySelectorAll("[data-mode]"));
 const paceButtons = Array.from(document.querySelectorAll("[data-pace]"));
 const exitCityViewBtn = document.querySelector("#exitCityViewBtn");
 const mapBadgeLabel = document.querySelector(".map-badge span");
+const foodInteractionRefresh = createLatestAsyncRefresh({
+  load: loadFoodController,
+  apply: (controller, selection) => controller.renderPanel(selection),
+  refresh: () => renderTripPlanner()
+});
 
 async function loadMapData() {
   const criticalData = await loadCriticalMapData({ loadJson });
@@ -1297,8 +1303,8 @@ function reportFoodModuleFailure(error) {
 function queueFoodPanelRender() {
   if (!document.documentElement.dataset.appReady) return;
   const selection = currentFoodSelection();
-  void loadFoodController()
-    .then((controller) => controller.renderPanel(selection))
+  void foodInteractionRefresh
+    .schedule(selection, { refreshOnResolve: !foodController })
     .catch(reportFoodModuleFailure);
 }
 

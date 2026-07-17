@@ -8,12 +8,45 @@ import {
   classifyDeferredSummaryData,
   createDeferredDataLoaders,
   createJsonLoader,
+  createLatestAsyncRefresh,
   isCountyRecordsPayload,
   isFoodArticlesPayload,
   loadCriticalMapData,
-  mergeProgressiveFoodArticles,
   scheduleIdle
 } from "../public/static-site/app-data.js";
+
+test("deferred module completion applies only the latest render and recomputes recommendations once", async () => {
+  let resolveModule;
+  let loadCalls = 0;
+  const modulePromise = new Promise((resolve) => { resolveModule = resolve; });
+  const applied = [];
+  const refreshed = [];
+  const scheduler = createLatestAsyncRefresh({
+    load() {
+      loadCalls += 1;
+      return modulePromise;
+    },
+    apply(_controller, value) { applied.push(value); },
+    refresh(_controller, value) { refreshed.push(value); }
+  });
+
+  const stale = scheduler.schedule("old plan", { refreshOnResolve: true });
+  await Promise.resolve();
+  assert.equal(loadCalls, 1, "initial render must start the shared module load");
+  const latest = scheduler.schedule("current plan", { refreshOnResolve: true });
+  await Promise.resolve();
+  assert.equal(loadCalls, 2);
+
+  resolveModule({ id: "food-controller" });
+  assert.deepEqual(await stale, { status: "stale" });
+  assert.deepEqual(await latest, { status: "applied" });
+  assert.deepEqual(applied, ["current plan"]);
+  assert.deepEqual(refreshed, ["current plan"]);
+
+  await scheduler.schedule("already ready", { refreshOnResolve: false });
+  assert.deepEqual(applied, ["current plan", "already ready"]);
+  assert.deepEqual(refreshed, ["current plan"], "ready renders must not schedule a recommendation loop");
+});
 
 test("exports the progressive asset and boundary chunk versions", () => {
   assert.equal(ASSET_VERSION, "progressive-1");
@@ -186,52 +219,6 @@ test("deferred summary status identifies county and food failures independently"
   assert.equal(isCountyRecordsPayload({ counties: null }), false);
   assert.equal(isFoodArticlesPayload({ articles: [] }), true);
   assert.equal(isFoodArticlesPayload(null), false);
-});
-
-test("per-city food fields win over summaries in both completion orders", () => {
-  const summary = [{
-    id: "food-1",
-    cityId: "chengdu",
-    title: "summary title",
-    description: "summary description",
-    day: 2
-  }];
-  const city = [{
-    id: "food-1",
-    cityId: "chengdu",
-    placeId: "chengdu-jinjiang",
-    title: "full city title",
-    description: "full city description",
-    foods: ["mapo tofu"],
-    sourceUrl: "https://example.test/full"
-  }];
-
-  const summaryThenCity = mergeProgressiveFoodArticles(
-    mergeProgressiveFoodArticles([], summary, { incomingSource: "summary" }),
-    city,
-    { incomingSource: "city" }
-  );
-  const cityThenSummary = mergeProgressiveFoodArticles(
-    mergeProgressiveFoodArticles([], city, { incomingSource: "city" }),
-    summary,
-    { incomingSource: "summary" }
-  );
-
-  assert.deepEqual(summaryThenCity, cityThenSummary);
-  assert.deepEqual(summaryThenCity, [{ ...summary[0], ...city[0] }]);
-});
-
-test("null or malformed food summaries are no-ops", () => {
-  const existing = [{ id: "food-1", title: "full city record" }];
-
-  assert.strictEqual(
-    mergeProgressiveFoodArticles(existing, null, { incomingSource: "summary" }),
-    existing
-  );
-  assert.strictEqual(
-    mergeProgressiveFoodArticles(existing, {}, { incomingSource: "summary" }),
-    existing
-  );
 });
 
 test("versioned JSON uses force-cache, combines signals, and retries once", async () => {

@@ -9,6 +9,7 @@ const foodContentUrl = new URL("../public/static-site/food-content.js", import.m
 test("food ownership lives behind one memoized dynamic import", async () => {
   const appSource = await readFile(appUrl, "utf8");
   const appDataSource = await readFile(new URL("../public/static-site/app-data.js", import.meta.url), "utf8");
+  const foodContentSource = await readFile(foodContentUrl, "utf8");
 
   await access(foodContentUrl);
   assert.equal((appSource.match(/import\(\s*["']\.\/food-content\.js["']\s*\)/g) ?? []).length, 1);
@@ -17,6 +18,8 @@ test("food ownership lives behind one memoized dynamic import", async () => {
   assert.doesNotMatch(appSource, /function\s+(?:renderFoodPanel|foodArticlePopupHtml|normalizeFoodArticleRecord|mergeFoodArticleRecords|groupArticlesBy)\s*\(/);
   assert.doesNotMatch(appSource, /wechat-food-summary\.json/);
   assert.match(appDataSource, /wechat-food-summary\.json/, "app-data may retain deferred source ownership");
+  assert.doesNotMatch(appDataSource, /mergeProgressiveFoodArticles/, "food merge ownership must not remain in app-data");
+  assert.match(foodContentSource, /export\s+function\s+createFoodStore\s*\(/);
 });
 
 test("Leaflet ownership lives in the public map-core module", async () => {

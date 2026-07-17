@@ -28,27 +28,6 @@ export function classifyDeferredSummaryData({ countyData, foodData }) {
   };
 }
 
-export function mergeProgressiveFoodArticles(existing, incoming, { incomingSource } = {}) {
-  if (!Array.isArray(incoming)) return existing;
-  const current = Array.isArray(existing) ? existing : [];
-  const byId = new Map(current.map((article) => [article.id, article]));
-  incoming.forEach((article) => {
-    if (!article || typeof article !== "object" || typeof article.id !== "string" || !article.id) return;
-    const previous = byId.get(article.id);
-    if (!previous) {
-      byId.set(article.id, article);
-      return;
-    }
-    byId.set(
-      article.id,
-      incomingSource === "city"
-        ? { ...previous, ...article }
-        : { ...article, ...previous }
-    );
-  });
-  return Array.from(byId.values());
-}
-
 function withVersion(path, version) {
   const separator = path.includes("?") ? "&" : "?";
   return `${path}${separator}v=${encodeURIComponent(version)}`;
@@ -175,6 +154,27 @@ export function createDeferredDataLoaders({ loadOptionalJson }) {
         retries: 1
       }));
       return foodSummaryPromise;
+    }
+  };
+}
+
+export function createLatestAsyncRefresh({ load, apply, refresh = () => {} } = {}) {
+  if (typeof load !== "function") throw new TypeError("load must be a function");
+  if (typeof apply !== "function") throw new TypeError("apply must be a function");
+  if (typeof refresh !== "function") throw new TypeError("refresh must be a function");
+  let generation = 0;
+
+  return {
+    schedule(value, { refreshOnResolve = false } = {}) {
+      const scheduledGeneration = ++generation;
+      return Promise.resolve()
+        .then(load)
+        .then((resource) => {
+          if (scheduledGeneration !== generation) return { status: "stale" };
+          apply(resource, value);
+          if (refreshOnResolve) refresh(resource, value);
+          return { status: "applied" };
+        });
     }
   };
 }

@@ -377,6 +377,16 @@ test("app wires deferred recovery, merge precedence, retryability and readiness 
   assert.doesNotMatch(app, /function\s+showBoundaryLoadHint\s*\(/);
 });
 
+test("deferred food completion refreshes only the latest trip recommendations", async () => {
+  const app = await readFile(appUrl, "utf8");
+  const queueFood = functionSource(app, "queueFoodPanelRender");
+
+  assert.match(app, /createLatestAsyncRefresh\s*\(\s*\{[\s\S]*?load:\s*loadFoodController[\s\S]*?controller\.renderPanel\s*\([\s\S]*?refresh:[\s\S]*?renderTripPlanner\s*\(/);
+  assert.match(queueFood, /foodInteractionRefresh\s*\.\s*schedule\s*\(/);
+  assert.match(queueFood, /refreshOnResolve:\s*!foodController/);
+  assert.doesNotMatch(queueFood, /\.then\s*\([\s\S]*?controller\.renderPanel/);
+});
+
 test("lightweight prefecture boundaries retain every city within the startup budget", async () => {
   const chunks = await Promise.all(
     litePrefectureUrls.map(async (url) => {

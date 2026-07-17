@@ -147,7 +147,21 @@ function safeExternalUrl(value) {
 
 function safeLocalPath(value) {
   const candidate = String(value || "").trim();
-  if (!candidate || candidate.startsWith("//") || /^[a-z][a-z\d+.-]*:/i.test(candidate)) return "";
+  if (
+    !candidate ||
+    candidate.startsWith("//") ||
+    candidate.includes("\\") ||
+    /^[a-z][a-z\d+.-]*:/i.test(candidate) ||
+    /[\u0000-\u001f\u007f]/.test(candidate)
+  ) return "";
+  try {
+    const decodedPath = decodeURIComponent(candidate.split(/[?#]/, 1)[0]);
+    if (decodedPath.split("/").some((segment) => segment === "..")) return "";
+    const resolved = new URL(candidate, "https://same-origin.invalid/");
+    if (resolved.origin !== "https://same-origin.invalid") return "";
+  } catch {
+    return "";
+  }
   return candidate;
 }
 
@@ -183,10 +197,11 @@ export function createFoodController({ state, elements = {}, data = {}, helpers 
 
   function articleReaderPath(article) {
     const externalUrl = safeExternalUrl(article.url);
-    if (!shouldUseLocalArticleAssets()) return externalUrl || "#";
-    return [article.readerPath, article.pdfPath, article.htmlPath, article.markdownPath]
+    const sameOriginPath = [article.readerPath, article.pdfPath, article.htmlPath, article.markdownPath]
       .map(safeLocalPath)
-      .find(Boolean) || externalUrl || "#";
+      .find(Boolean);
+    if (!shouldUseLocalArticleAssets() && externalUrl) return externalUrl;
+    return sameOriginPath || externalUrl || "#";
   }
 
   function articleCoverImage(article) {
