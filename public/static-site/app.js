@@ -879,8 +879,9 @@ async function resetMapView() {
   if (state.viewMode === "city") {
     const activeCity = cityById(state.activeCityViewId);
     if (activeCity) {
-      await loadCityDetail(activeCity);
-      renderPanel();
+      const detailSession = mapController.enterCityView(activeCity.id);
+      await loadCityDetail(activeCity, detailSession);
+      if (mapController.isDetailSessionCurrent(detailSession)) renderPanel();
     }
     return;
   }
@@ -2337,12 +2338,10 @@ async function enterCityView(cityId) {
   const city = cityById(cityId);
   if (!city || !state.map || !mapController) return;
 
-  cancelQueuedCityClick();
-  state.viewMode = "city";
-  state.activeCityViewId = city.id;
-
-  mapController.enterCityView();
-  await loadCityDetail(city);
+  const detailSession = mapController.enterCityView(city.id);
+  if (!detailSession) return;
+  await loadCityDetail(city, detailSession);
+  if (!mapController.isDetailSessionCurrent(detailSession)) return;
   exitCityViewBtn.hidden = false;
   renderPanel();
 }
@@ -2351,18 +2350,20 @@ function exitCityView(options = {}) {
   mapController?.enterChinaView(options);
 }
 
-async function loadCityDetail(city) {
+async function loadCityDetail(city, detailSession) {
+  const isCurrent = () => mapController?.isDetailSessionCurrent(detailSession);
+  if (!isCurrent()) return false;
   mapController.clearCityDetail();
   await Promise.all([
-    ensureCityCounties(city.id),
-    ensureCityFoodArticles(city.id)
+    ensureCityCounties(city.id, { isCurrent }),
+    ensureCityFoodArticles(city.id, { isCurrent })
   ]);
-  if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
+  if (!isCurrent()) return false;
 
   const sourceLayer = state.cityFeatureLayers.get(city.id);
   const subareas = citySubareas(city);
-  const districtData = await fetchCityDistrictBoundaries(city);
-  if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
+  const districtData = await fetchCityDistrictBoundaries(city, { isCurrent });
+  if (!isCurrent()) return false;
   const districts = Array.isArray(districtData?.features)
     ? districtData.features.map((feature) => {
         const place = districtPlaceFromFeature(city, feature);
@@ -2376,16 +2377,17 @@ async function loadCityDetail(city) {
     : [];
   const boundaryData = districtData || (sourceLayer && sourceLayer.feature);
   const queryBounds = cityDetailQueryBounds(boundaryData, districts.length ? [] : subareas);
-  const landmarks = await resolveCityLandmarks(city, queryBounds, boundaryData);
-  if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
-  const stations = await resolveCityStations(city, queryBounds, boundaryData);
-  if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
-  const metroNetwork = await resolveCityMetroNetwork(city);
-  if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
-  const subwayStations = await resolveCitySubwayStations(city, queryBounds, boundaryData, metroNetwork);
-  if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
+  const landmarks = await resolveCityLandmarks(city, queryBounds, boundaryData, { isCurrent });
+  if (!isCurrent()) return false;
+  const stations = await resolveCityStations(city, queryBounds, boundaryData, { isCurrent });
+  if (!isCurrent()) return false;
+  const metroNetwork = await resolveCityMetroNetwork(city, { isCurrent });
+  if (!isCurrent()) return false;
+  const subwayStations = await resolveCitySubwayStations(city, queryBounds, boundaryData, metroNetwork, { isCurrent });
+  if (!isCurrent()) return false;
   const foodArticles = articlesForCity(city.id);
-  mapController.renderCityDetail({
+  return mapController.renderCityDetail({
+    session: detailSession,
     city,
     sourceFeature: districts.length ? null : sourceLayer?.feature || null,
     districts,
@@ -2404,7 +2406,7 @@ async function loadCityDetail(city) {
   });
 }
 
-async function fetchCityDistrictBoundaries(city) {
+async function fetchCityDistrictBoundaries(city, { isCurrent = () => true } = {}) {
   const adcode = state.cityAdcodes.get(city.id);
   if (!adcode || !/^\d{6}$/.test(adcode) || adcode === "710000") return null;
   if (state.cityBoundaryCache.has(adcode)) return state.cityBoundaryCache.get(adcode);
@@ -2414,11 +2416,11 @@ async function fetchCityDistrictBoundaries(city) {
     if (!response.ok) throw new Error(`HTTP ${response.status}`);
     const data = await response.json();
     const usable = data && Array.isArray(data.features) && data.features.length ? data : null;
-    state.cityBoundaryCache.set(adcode, usable);
+    if (isCurrent()) state.cityBoundaryCache.set(adcode, usable);
     return usable;
   } catch (error) {
     console.warn("district boundary fallback", city.name, error);
-    state.cityBoundaryCache.set(adcode, null);
+    if (isCurrent()) state.cityBoundaryCache.set(adcode, null);
     return null;
   }
 }
@@ -2531,7 +2533,7 @@ function cityLandmarks(city) {
   return mergeLandmarks(known, extended, city);
 }
 
-async function resolveCityLandmarks(city, bounds, boundaryData) {
+async function resolveCityLandmarks(city, bounds, boundaryData, { isCurrent = () => true } = {}) {
   const cacheKey = state.cityAdcodes.get(city.id) || city.id;
   if (state.landmarkCache.has(cacheKey)) return state.landmarkCache.get(cacheKey);
 
@@ -2539,7 +2541,7 @@ async function resolveCityLandmarks(city, bounds, boundaryData) {
   const live = await fetchTourismLandmarksFromOsm(city, bounds);
   const boundaryFiltered = boundaryData ? live.filter((landmark) => pointInGeoJson(landmark, boundaryData)) : live;
   const landmarks = mergeLandmarks(curated, boundaryFiltered, city);
-  state.landmarkCache.set(cacheKey, landmarks);
+  if (isCurrent()) state.landmarkCache.set(cacheKey, landmarks);
   return landmarks;
 }
 
@@ -2646,27 +2648,27 @@ function cityStations(city) {
   return known || [];
 }
 
-async function resolveCityStations(city, bounds, boundaryData) {
+async function resolveCityStations(city, bounds, boundaryData, { isCurrent = () => true } = {}) {
   const cacheKey = state.cityAdcodes.get(city.id) || city.id;
   if (state.stationCache.has(cacheKey)) return state.stationCache.get(cacheKey);
 
   const curatedStations = cityStations(city);
-  const passengerStationNames = await fetchPassengerStationNames();
+  const passengerStationNames = await fetchPassengerStationNames({ isCurrent });
   if (curatedStations.length) {
     const validatedStations = curatedStations.filter((station) => isPassengerStationName(station.name, passengerStationNames));
-    state.stationCache.set(cacheKey, validatedStations);
+    if (isCurrent()) state.stationCache.set(cacheKey, validatedStations);
     return validatedStations;
   }
 
   const liveStations = passengerStationNames.size ? await fetchRailwayStationsFromOsm(city, bounds, passengerStationNames) : [];
   const filteredStations = boundaryData ? liveStations.filter((station) => pointInGeoJson(station, boundaryData)) : liveStations;
-  state.stationCache.set(cacheKey, filteredStations);
+  if (isCurrent()) state.stationCache.set(cacheKey, filteredStations);
   return filteredStations;
 }
 
-async function resolveCityMetroNetwork(city) {
+async function resolveCityMetroNetwork(city, { isCurrent = () => true } = {}) {
   const empty = { lines: [], stations: [] };
-  const data = await loadMetroNetworkData();
+  const data = await loadMetroNetworkData({ isCurrent });
   if (!data || !data.networks) return empty;
 
   const keys = metroCityKeys(city);
@@ -2674,26 +2676,22 @@ async function resolveCityMetroNetwork(city) {
   return key ? data.networks[key] : empty;
 }
 
-async function loadMetroNetworkData() {
+async function loadMetroNetworkData({ isCurrent = () => true } = {}) {
   if (state.metroNetworkData) return state.metroNetworkData;
-  if (state.metroNetworkPromise) return state.metroNetworkPromise;
-
-  state.metroNetworkPromise = fetch("./data/metro-networks.json", { cache: "force-cache" })
-    .then((response) => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json();
-    })
-    .then((data) => {
-      state.metroNetworkData = data;
-      return data;
-    })
-    .catch((error) => {
-      console.warn("metro network data unavailable", error);
-      state.metroNetworkData = { networks: {} };
-      return state.metroNetworkData;
-    });
-
-  return state.metroNetworkPromise;
+  if (!state.metroNetworkPromise) {
+    state.metroNetworkPromise = fetch("./data/metro-networks.json", { cache: "force-cache" })
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .catch((error) => {
+        console.warn("metro network data unavailable", error);
+        return { networks: {} };
+      });
+  }
+  const data = await state.metroNetworkPromise;
+  if (isCurrent()) state.metroNetworkData = data;
+  return data;
 }
 
 function metroCityKeys(city) {
@@ -2710,7 +2708,7 @@ function metroCityKeys(city) {
   return Array.from(new Set([aliases[key], key, normalizeKey(city.name)].filter(Boolean)));
 }
 
-async function resolveCitySubwayStations(city, bounds, boundaryData, metroNetwork = null) {
+async function resolveCitySubwayStations(city, bounds, boundaryData, metroNetwork = null, { isCurrent = () => true } = {}) {
   const cacheKey = state.cityAdcodes.get(city.id) || city.id;
   if (state.subwayStationCache.has(cacheKey)) return state.subwayStationCache.get(cacheKey);
 
@@ -2719,7 +2717,7 @@ async function resolveCitySubwayStations(city, bounds, boundaryData, metroNetwor
       ...station,
       source: "metro-network"
     }));
-    state.subwayStationCache.set(cacheKey, stations);
+    if (isCurrent()) state.subwayStationCache.set(cacheKey, stations);
     return stations;
   }
 
@@ -2727,7 +2725,7 @@ async function resolveCitySubwayStations(city, bounds, boundaryData, metroNetwor
   const liveStations = await fetchSubwayStationsFromOsm(city, bounds);
   const filteredStations = boundaryData ? liveStations.filter((station) => pointInGeoJson(station, boundaryData)) : liveStations;
   const stations = mergeSubwayStations(curatedStations, filteredStations.length ? filteredStations : liveStations, city);
-  state.subwayStationCache.set(cacheKey, stations);
+  if (isCurrent()) state.subwayStationCache.set(cacheKey, stations);
   return stations;
 }
 
@@ -2735,35 +2733,34 @@ function citySubwayStations(city) {
   return catalogEntry(subwayStationCatalog, city) || [];
 }
 
-async function fetchPassengerStationNames() {
+async function fetchPassengerStationNames({ isCurrent = () => true } = {}) {
   if (state.passengerStationNames) return state.passengerStationNames;
-  if (state.passengerStationNamesPromise) return state.passengerStationNamesPromise;
-
-  state.passengerStationNamesPromise = fetch("./data/railway-stations-12306.json", {
-    cache: "force-cache"
-  })
-    .then((response) => {
-      if (!response.ok) throw new Error(`HTTP ${response.status}`);
-      return response.json();
+  if (!state.passengerStationNamesPromise) {
+    state.passengerStationNamesPromise = fetch("./data/railway-stations-12306.json", {
+      cache: "force-cache"
     })
-    .then((data) => {
-      const names = new Set();
-      (data.stations || []).forEach((station) => {
-        const stationName = station.name || station.stationName;
-        if (!stationName) return;
-        addPassengerStationName(names, stationName);
-        addPassengerStationName(names, normalizeStationName(stationName));
+      .then((response) => {
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
+        return response.json();
+      })
+      .then((data) => {
+        const names = new Set();
+        (data.stations || []).forEach((station) => {
+          const stationName = station.name || station.stationName;
+          if (!stationName) return;
+          addPassengerStationName(names, stationName);
+          addPassengerStationName(names, normalizeStationName(stationName));
+        });
+        return names;
+      })
+      .catch((error) => {
+        console.warn("12306 passenger station list unavailable", error);
+        return new Set();
       });
-      state.passengerStationNames = names;
-      return names;
-    })
-    .catch((error) => {
-      console.warn("12306 passenger station list unavailable", error);
-      state.passengerStationNames = new Set();
-      return state.passengerStationNames;
-    });
-
-  return state.passengerStationNamesPromise;
+  }
+  const names = await state.passengerStationNamesPromise;
+  if (isCurrent()) state.passengerStationNames = names;
+  return names;
 }
 
 function addPassengerStationName(names, name) {
@@ -3058,41 +3055,37 @@ function articlesForPlace(placeId) {
   return state.foodArticlesByPlace.get(placeId) || [];
 }
 
-async function ensureCityCounties(cityId) {
+async function ensureCityCounties(cityId, { isCurrent = () => true } = {}) {
   if (!cityId || state.loadedCountyCityIds.has(cityId)) return citySubareas(cityById(cityId));
-  if (state.countyLoadPromises.has(cityId)) return state.countyLoadPromises.get(cityId);
-
-  const promise = loadOptionalJson(`./data/counties/by-city/${cityId}.json`, { quiet: true })
-    .then((data) => {
-      if (!isCountyRecordsPayload(data)) return citySubareas(cityById(cityId));
-      const counties = data.counties;
-      mergeCountyRecords(placeIndex, counties);
-      syncPlaceIndex();
-      state.loadedCountyCityIds.add(cityId);
-      return counties;
-    })
-    .finally(() => state.countyLoadPromises.delete(cityId));
-
-  state.countyLoadPromises.set(cityId, promise);
-  return promise;
+  if (!state.countyLoadPromises.has(cityId)) {
+    const request = loadOptionalJson(`./data/counties/by-city/${cityId}.json`, { quiet: true })
+      .finally(() => state.countyLoadPromises.delete(cityId));
+    state.countyLoadPromises.set(cityId, request);
+  }
+  const data = await state.countyLoadPromises.get(cityId);
+  if (!isCurrent()) return citySubareas(cityById(cityId));
+  if (!isCountyRecordsPayload(data)) return citySubareas(cityById(cityId));
+  const counties = data.counties;
+  mergeCountyRecords(placeIndex, counties);
+  syncPlaceIndex();
+  state.loadedCountyCityIds.add(cityId);
+  return counties;
 }
 
-async function ensureCityFoodArticles(cityId) {
+async function ensureCityFoodArticles(cityId, { isCurrent = () => true } = {}) {
   if (!cityId || state.loadedFoodArticleCityIds.has(cityId)) return articlesForCity(cityId);
-  if (state.foodArticleLoadPromises.has(cityId)) return state.foodArticleLoadPromises.get(cityId);
-
-  const promise = loadOptionalJson(`./data/food-articles/by-city/${cityId}.json`, { quiet: true })
-    .then((data) => {
-      if (!isFoodArticlesPayload(data)) return articlesForCity(cityId);
-      const articles = data.articles;
-      mergeFoodArticleRecords(articles, { incomingSource: "city" });
-      state.loadedFoodArticleCityIds.add(cityId);
-      return articles;
-    })
-    .finally(() => state.foodArticleLoadPromises.delete(cityId));
-
-  state.foodArticleLoadPromises.set(cityId, promise);
-  return promise;
+  if (!state.foodArticleLoadPromises.has(cityId)) {
+    const request = loadOptionalJson(`./data/food-articles/by-city/${cityId}.json`, { quiet: true })
+      .finally(() => state.foodArticleLoadPromises.delete(cityId));
+    state.foodArticleLoadPromises.set(cityId, request);
+  }
+  const data = await state.foodArticleLoadPromises.get(cityId);
+  if (!isCurrent()) return articlesForCity(cityId);
+  if (!isFoodArticlesPayload(data)) return articlesForCity(cityId);
+  const articles = data.articles;
+  mergeFoodArticleRecords(articles, { incomingSource: "city" });
+  state.loadedFoodArticleCityIds.add(cityId);
+  return articles;
 }
 
 function articleCountForCity(cityId) {

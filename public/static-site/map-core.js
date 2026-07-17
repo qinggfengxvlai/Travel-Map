@@ -8,12 +8,57 @@ const provinceCodeNames = {
   65: "新疆", 71: "台湾", 81: "香港", 82: "澳门"
 };
 
-export function createMapController({ L, state, elements = {}, callbacks = {}, helpers = {} }) {
-  if (!L) throw new Error("Leaflet renderer did not load");
-  if (!state) throw new TypeError("Map controller requires shared state");
+function defaultEscapeHtml(value) {
+  return String(value).replace(/[&<>"']/g, (character) => ({
+    "&": "&amp;",
+    "<": "&lt;",
+    ">": "&gt;",
+    "\"": "&quot;",
+    "'": "&#39;"
+  }[character]));
+}
+
+function requireObject(value, label) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new TypeError(`Map controller ${label} must be an object`);
+  }
+}
+
+function validateFunctionRecord(record, label) {
+  Object.entries(record).forEach(([name, value]) => {
+    if (typeof value !== "function") {
+      throw new TypeError(`Map controller ${label}.${name} must be a function`);
+    }
+  });
+}
+
+export function createMapController(options) {
+  requireObject(options, "options");
+  const { L, state, elements = {}, callbacks = {}, helpers = {} } = options;
+  requireObject(L, "L");
+  requireObject(state, "state");
+  requireObject(elements, "elements");
+  requireObject(callbacks, "callbacks");
+  requireObject(helpers, "helpers");
+  validateFunctionRecord(callbacks, "callbacks");
+  validateFunctionRecord(helpers, "helpers");
+  if ("mobileViewButtons" in elements && !Array.isArray(elements.mobileViewButtons)) {
+    throw new TypeError("Map controller elements.mobileViewButtons must be an array");
+  }
+  if (elements.appShell != null && typeof elements.appShell.classList?.toggle !== "function") {
+    throw new TypeError("Map controller elements.appShell must provide classList.toggle");
+  }
+  (elements.mobileViewButtons || []).forEach((button, index) => {
+    if (!button || typeof button.classList?.toggle !== "function" || typeof button.setAttribute !== "function") {
+      throw new TypeError(`Map controller elements.mobileViewButtons[${index}] must provide classList.toggle and setAttribute`);
+    }
+  });
+  if (elements.exitCityViewBtn != null && typeof elements.exitCityViewBtn !== "object") {
+    throw new TypeError("Map controller elements.exitCityViewBtn must be an object");
+  }
 
   const normalizeKey = helpers.normalizeKey || ((value) => String(value || "").trim());
-  const escapeHtml = helpers.escapeHtml || ((value) => String(value));
+  const escapeHtml = helpers.escapeHtml || defaultEscapeHtml;
   const articleCountForCity = helpers.articleCountForCity || (() => 0);
   const cityById = helpers.cityById || ((id) => state.cityById.get(id));
   const placeById = helpers.placeById || ((id) => state.placeById.get(id) || cityById(id));
@@ -26,6 +71,29 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
   const hasCoordinates = helpers.hasCoordinates || ((place) =>
     Number.isFinite(Number(place && place.lon)) && Number.isFinite(Number(place && place.lat)));
   const labelEvents = "moveend zoomend";
+  let destroyed = false;
+  let detailGeneration = 0;
+
+  function invokeCallback(name, ...args) {
+    if (destroyed) return;
+    callbacks[name]?.(...args);
+  }
+
+  function invalidateDetailWork() {
+    detailGeneration += 1;
+    return detailGeneration;
+  }
+
+  function isDetailSessionCurrent(session) {
+    return Boolean(
+      !destroyed &&
+      state.map &&
+      session &&
+      session.generation === detailGeneration &&
+      session.cityId === state.activeCityViewId &&
+      state.viewMode === "city"
+    );
+  }
 
   function provinceNameFromFeature(feature) {
     const id = feature && feature.properties ? String(feature.properties.id || "") : "";
@@ -102,10 +170,10 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
           sticky: true
         });
         layer.on({
-          click: () => callbacks.queueCityClick?.(city.id),
+          click: () => invokeCallback("queueCityClick", city.id),
           dblclick: (event) => {
             if (event.originalEvent) L.DomEvent.stop(event.originalEvent);
-            callbacks.enterCityView?.(city.id);
+            invokeCallback("enterCityView", city.id);
           },
           mouseover: () => layer.setStyle({ fillOpacity: 0.98, weight: 1.45, color: "#78916c" }),
           mouseout: () => layer.setStyle(featureStyle(feature))
@@ -129,10 +197,10 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
         opacity: 1,
         sticky: true
       });
-      marker.on("click", () => callbacks.queueCityClick?.(city.id));
+      marker.on("click", () => invokeCallback("queueCityClick", city.id));
       marker.on("dblclick", (event) => {
         if (event.originalEvent) L.DomEvent.stop(event.originalEvent);
-        callbacks.enterCityView?.(city.id);
+        invokeCallback("enterCityView", city.id);
       });
       marker.addTo(state.cityLayer);
       city.marker = marker;
@@ -168,6 +236,7 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
   }
 
   function init() {
+    if (destroyed) return null;
     if (state.map) return state.map;
     state.canvasRenderer = L.canvas({ padding: 0.65, tolerance: 8 });
     state.map = L.map(elements.mapTarget || "travelMap", {
@@ -200,7 +269,7 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
   }
 
   function fitChina() {
-    if (!state.chinaLayer || !state.map) return;
+    if (destroyed || !state.chinaLayer || !state.map) return;
     const bounds = state.chinaLayer.getBounds();
     if (bounds.isValid()) {
       state.map.fitBounds(bounds, {
@@ -244,7 +313,7 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
   }
 
   function renderRoutes() {
-    if (!state.routeLayer) return;
+    if (destroyed || !state.routeLayer) return;
     state.routeLayer.clearLayers();
     state.routes.forEach((route) => {
       const from = placeById(route.from);
@@ -271,18 +340,24 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
   }
 
   function updateCityStyles() {
+    if (destroyed) return;
     state.cities.forEach((city) => city.marker?.setStyle(cityStyle(city.id)));
     state.chinaLayer?.setStyle(featureStyle);
     updateVisibleLabels();
   }
 
-  function enterCityView() {
-    if (!state.map) return;
+  function enterCityView(cityId) {
+    if (destroyed || !state.map || !cityId) return null;
+    invokeCallback("cancelQueuedCityClick");
+    const session = Object.freeze({ generation: invalidateDetailWork(), cityId });
+    state.viewMode = "city";
+    state.activeCityViewId = cityId;
     [state.chinaLayer, state.cityLayer, state.labelLayer].forEach((layer) => {
       if (layer && state.map.hasLayer(layer)) state.map.removeLayer(layer);
     });
     if (state.routeLayer && !state.map.hasLayer(state.routeLayer)) state.routeLayer.addTo(state.map);
     if (state.cityDetailLayer && !state.map.hasLayer(state.cityDetailLayer)) state.cityDetailLayer.addTo(state.map);
+    return session;
   }
 
   function districtBoundaryStyle(feature) {
@@ -302,6 +377,11 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
     return /^[0-9a-f]{6}$/i.test(text) ? `#${text}` : "#0f8f83";
   }
 
+  function markerClassToken(value, fallback = "scenic") {
+    const token = String(value || "").replace(/[^a-z0-9_-]/gi, "");
+    return token || fallback;
+  }
+
   function addDetailLabel(detailBounds, { name, lat, lon, className, fontSize }) {
     detailBounds.extend([lat, lon]);
     L.marker([lat, lon], {
@@ -317,10 +397,23 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
   }
 
   function clearCityDetail() {
+    if (destroyed) return;
     state.cityDetailLayer?.clearLayers();
   }
 
+  function resetDetailState() {
+    state.viewMode = "china";
+    state.activeCityViewId = null;
+    state.activeDistrictBoundaryCount = 0;
+    state.activeLandmarkCount = 0;
+    state.activeStationCount = 0;
+    state.activeSubwayLineCount = 0;
+    state.activeSubwayStationCount = 0;
+    state.activeFoodArticleCount = 0;
+  }
+
   function renderCityDetail({
+    session,
     city,
     sourceFeature = null,
     districts = [],
@@ -332,7 +425,7 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
     foodMarkers = [],
     foodArticleCount = foodMarkers.length
   } = {}) {
-    if (!city || !state.map || !state.cityDetailLayer) return;
+    if (!city || !state.cityDetailLayer || !isDetailSessionCurrent(session) || city.id !== session.cityId) return false;
     clearCityDetail();
     const detailBounds = L.latLngBounds([]);
 
@@ -377,7 +470,7 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
             sticky: true
           });
           layer.on({
-            click: () => district.placeId && callbacks.queuePlaceClick?.(district.placeId),
+            click: () => district.placeId && invokeCallback("queuePlaceClick", district.placeId),
             mouseover: () => layer.setStyle({ fillOpacity: 0.96, weight: 1.6, color: "#234f44" }),
             mouseout: () => layer.setStyle(districtBoundaryStyle(feature))
           });
@@ -412,7 +505,7 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
             opacity: 1,
             sticky: true
           })
-          .on("click", () => callbacks.queuePlaceClick?.(area.id))
+          .on("click", () => invokeCallback("queuePlaceClick", area.id))
           .addTo(state.cityDetailLayer);
         addDetailLabel(detailBounds, { name: area.name, lat: area.lat, lon: area.lon, className: "city-detail-label", fontSize: 12 });
       });
@@ -423,7 +516,7 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
       L.marker([landmark.lat, landmark.lon], {
         icon: L.divIcon({
           className: "",
-          html: `<span class="landmark-marker ${escapeHtml(landmark.type || "scenic")}"><span>${landmark.symbol}</span></span>`,
+          html: `<span class="landmark-marker ${markerClassToken(landmark.type)}"><span>${escapeHtml(landmark.symbol || "")}</span></span>`,
           iconSize: [18, 18],
           iconAnchor: [9, 9]
         })
@@ -545,26 +638,24 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
         .addTo(state.cityDetailLayer);
     });
 
-    if (!detailBounds.isValid()) return;
-    state.map.fitBounds(detailBounds.pad(0.18), {
-      paddingTopLeft: [28, 28],
-      paddingBottomRight: [28, 28],
-      animate: true,
-      duration: 0.35
-    });
+    if (detailBounds.isValid()) {
+      state.map.fitBounds(detailBounds.pad(0.18), {
+        paddingTopLeft: [28, 28],
+        paddingBottomRight: [28, 28],
+        animate: true,
+        duration: 0.35
+      });
+    }
+    return true;
   }
 
   function enterChinaView(options = {}) {
-    if (!state.map) return;
-    callbacks.cancelQueuedCityClick?.();
-    state.viewMode = "china";
-    state.activeCityViewId = null;
-    state.activeDistrictBoundaryCount = 0;
-    state.activeLandmarkCount = 0;
-    state.activeStationCount = 0;
-    state.activeSubwayLineCount = 0;
-    state.activeSubwayStationCount = 0;
+    if (destroyed) return;
+    invalidateDetailWork();
+    invokeCallback("cancelQueuedCityClick");
+    resetDetailState();
     clearCityDetail();
+    if (!state.map) return;
     [state.chinaLayer, state.routeLayer, state.cityLayer, state.labelLayer].forEach((layer) => {
       if (layer && !state.map.hasLayer(layer)) layer.addTo(state.map);
     });
@@ -572,11 +663,11 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
     renderRoutes();
     updateCityStyles();
     if (options.fit !== false) fitChina();
-    callbacks.renderPanel?.();
+    invokeCallback("renderPanel");
   }
 
   function setMobileView(view) {
-    if (!elements.appShell || !["plan", "map"].includes(view)) return;
+    if (destroyed || !elements.appShell || !["plan", "map"].includes(view)) return;
     elements.appShell.classList.toggle("mobile-plan", view === "plan");
     elements.appShell.classList.toggle("mobile-map", view === "map");
     (elements.mobileViewButtons || []).forEach((button) => {
@@ -616,14 +707,16 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
   }
 
   function calculateRouteMetrics(route) {
+    if (destroyed) return;
     const updates = routeMetricUpdates(route);
     if (!updates || !state.routes.includes(route)) return;
     Object.assign(route, updates);
     renderRoutes();
-    callbacks.routeMetricsUpdated?.(route);
+    invokeCallback("routeMetricsUpdated", route);
   }
 
   function recalculateRoutesForTransport() {
+    if (destroyed) return;
     state.routes.forEach((route) => {
       const updates = routeMetricUpdates({ ...route, transportMode: state.transportMode });
       if (updates) Object.assign(route, updates);
@@ -632,7 +725,7 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
 
   function distanceBetween(from, to) { return haversineDistance(from, to); }
   function focusPlace(place, { minimumZoom = 10, duration = 0.45 } = {}) {
-    if (!state.map || !hasCoordinates(place)) return;
+    if (destroyed || !state.map || !hasCoordinates(place)) return;
     state.map.flyTo(
       [Number(place.lat), Number(place.lon)],
       Math.max(state.map.getZoom(), minimumZoom),
@@ -641,10 +734,20 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
   }
 
   function destroy() {
-    if (!state.map) return;
-    state.map.off(labelEvents, updateVisibleLabels);
-    state.cities.forEach((city) => { city.marker = null; });
-    state.map.remove();
+    if (destroyed) return;
+    invokeCallback("cancelQueuedCityClick");
+    invalidateDetailWork();
+    clearCityDetail();
+    resetDetailState();
+    destroyed = true;
+    const map = state.map;
+    if (map) {
+      map.off(labelEvents, updateVisibleLabels);
+      map.remove();
+    }
+    (state.cities || []).forEach((city) => { city.marker = null; });
+    state.cityFeatureLayers?.clear?.();
+    state.featureCityIds = new WeakMap();
     state.map = null;
     state.canvasRenderer = null;
     state.chinaLayer = null;
@@ -661,6 +764,7 @@ export function createMapController({ L, state, elements = {}, callbacks = {}, h
     updateCityStyles,
     enterCityView,
     enterChinaView,
+    isDetailSessionCurrent,
     renderCityDetail,
     clearCityDetail,
     setMobileView,

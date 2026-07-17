@@ -21,6 +21,12 @@ test("Leaflet ownership lives in the public map-core module", async () => {
   );
   assert.doesNotMatch(appSource, /state\.cityDetailLayer\b|\.addTo\s*\(/, "app.js must not attach or clear map layers");
   assert.match(appSource, /mapController\.renderCityDetail\s*\(/);
+  assert.match(appSource, /const\s+detailSession\s*=\s*mapController\.enterCityView\s*\(\s*city\.id\s*\)/);
+  assert.match(
+    appSource,
+    /await\s+loadCityDetail\s*\(\s*city\s*,\s*detailSession\s*\)[\s\S]*?isDetailSessionCurrent\s*\(\s*detailSession\s*\)[\s\S]*?exitCityViewBtn\.hidden\s*=\s*false/
+  );
+  assert.match(appSource, /renderCityDetail\s*\(\s*\{\s*session:\s*detailSession,/);
   assert.match(appSource, /createMapController\s*\(\s*\{[\s\S]*?L:\s*window\.L[\s\S]*?state,[\s\S]*?callbacks:[\s\S]*?helpers:/);
   assert.doesNotMatch(
     appSource,
@@ -112,8 +118,9 @@ test("map controller owns cohesive city-detail rendering and lifecycle", async (
     helpers: { articleCountForCity: () => 0 }
   });
 
-  controller.enterCityView();
+  const detailSession = controller.enterCityView("city");
   controller.renderCityDetail({
+    session: detailSession,
     city: { id: "city", name: "测试城" },
     sourceFeature: { type: "Feature", properties: {} },
     districts: [{ feature: { type: "Feature", properties: {} }, name: "一区", placeId: "district", labelPoint: { lat: 1, lon: 2 } }],
@@ -228,10 +235,14 @@ test("map controller initializes Leaflet layers and renders routes through injec
   });
 
   controller.init();
+  controller.init();
   featureEvents.click();
   featureEvents.dblclick({ originalEvent: {} });
   controller.renderRoutes();
   controller.destroy();
+  controller.destroy();
+  controller.init();
+  featureEvents.click();
 
   assert.equal(state.map, null);
   assert.equal(calls.filter(([name]) => name === "map").length, 1);
@@ -239,7 +250,7 @@ test("map controller initializes Leaflet layers and renders routes through injec
   assert.equal(calls.filter(([name]) => name === "polyline").length, 2);
   assert.ok(calls.some(([name, id]) => name === "city.click" && id === city.id));
   assert.ok(calls.some(([name, id]) => name === "city.dblclick" && id === city.id));
-  assert.ok(calls.some(([name]) => name === "map.remove"));
+  assert.equal(calls.filter(([name]) => name === "map.remove").length, 1);
 });
 
 test("map controller applies injected route profiles and mobile view state", async () => {
@@ -287,4 +298,136 @@ test("map controller applies injected route profiles and mobile view state", asy
     ["active", true],
     ["aria-selected", "true"]
   ]);
+});
+
+test("city-detail generations reject stale A-B-A and post-China completions", async () => {
+  const { createMapController } = await import(mapCoreUrl);
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise((done) => { resolve = done; });
+    return { promise, resolve };
+  };
+  const renders = [];
+  const detailLayer = { clearLayers() { renders.push("clear"); }, addTo() { return this; } };
+  const map = {
+    hasLayer() { return true; }, removeLayer() {}, fitBounds() {}, getBounds() { return { pad() { return this; }, contains() { return true; } }; }, getZoom() { return 8; }
+  };
+  const L = { latLngBounds() { return { isValid() { return false; } }; } };
+  const state = {
+    map,
+    cityDetailLayer: detailLayer,
+    cities: [], routes: [], cityById: new Map(), placeById: new Map(),
+    chinaLayer: null, routeLayer: null, cityLayer: null, labelLayer: null
+  };
+  const controller = createMapController({ L, state });
+  const a1Deferred = deferred();
+  const bDeferred = deferred();
+  const a2Deferred = deferred();
+  const a1 = controller.enterCityView("A");
+  const a1Result = a1Deferred.promise.then(() => controller.renderCityDetail({ session: a1, city: { id: "A" } }));
+  const b = controller.enterCityView("B");
+  const bResult = bDeferred.promise.then(() => controller.renderCityDetail({ session: b, city: { id: "B" } }));
+  const a2 = controller.enterCityView("A");
+  const a2Result = a2Deferred.promise.then(() => controller.renderCityDetail({ session: a2, city: { id: "A" } }));
+
+  bDeferred.resolve();
+  a1Deferred.resolve();
+  a2Deferred.resolve();
+  assert.equal(await bResult, false);
+  assert.equal(await a1Result, false);
+  assert.equal(await a2Result, true);
+
+  const leaving = deferred();
+  const leavingSession = controller.enterCityView("A");
+  const leavingResult = leaving.promise.then(() => controller.renderCityDetail({ session: leavingSession, city: { id: "A" } }));
+  controller.enterChinaView();
+  leaving.resolve();
+  assert.equal(await leavingResult, false);
+});
+
+test("destroy cancels callbacks, clears Leaflet references, and suppresses pending clicks", async () => {
+  const { createMapController } = await import(mapCoreUrl);
+  let featureEvents;
+  let clickCount = 0;
+  let cancelCount = 0;
+  let removeCount = 0;
+  const layer = { addTo() { return this; }, clearLayers() {}, setStyle() {}, getBounds() { return { isValid() { return false; } }; } };
+  const map = {
+    attributionControl: { setPrefix() {} }, createPane() {}, getPane() { return { style: {} }; },
+    on() {}, off() {}, fitBounds() {}, getBounds() { return { pad() { return this; }, contains() { return true; } }; }, getZoom() { return 5; },
+    remove() { removeCount += 1; }
+  };
+  const city = { id: "city", name: "City", province: "P", lat: 1, lon: 2 };
+  const L = {
+    canvas() { return {}; }, map() { return map; }, layerGroup() { return { ...layer }; },
+    geoJSON(data, options) {
+      options.onEachFeature(data.features[0], { bindTooltip() { return this; }, on(events) { featureEvents = events; }, setStyle() {} });
+      return { ...layer };
+    },
+    circleMarker() { return { bindTooltip() { return this; }, on() { return this; }, addTo() { return this; }, setStyle() {} }; },
+    marker() { return { addTo() { return this; } }; }, divIcon(value) { return value; },
+    latLngBounds() { return { isValid() { return false; } }; }, DomEvent: { stop() {} }
+  };
+  const state = {
+    selectedCityId: null, routes: [], cities: [city], cityById: new Map([[city.id, city]]), placeById: new Map(),
+    cityByKey: new Map([[city.name, city]]), cityByProvinceKey: new Map([[`P|${city.name}`, city]]), cityKeyEntries: [[city.name, city]],
+    cityFeatureLayers: new Map([["old", {}]]), cityAdcodes: new Map(), featureCityIds: new WeakMap(),
+    mapData: { features: [{ properties: { name: city.name } }] }, viewMode: "china"
+  };
+  const controller = createMapController({
+    L, state,
+    callbacks: { queueCityClick() { clickCount += 1; }, cancelQueuedCityClick() { cancelCount += 1; } },
+    helpers: { normalizeKey: (value) => value }
+  });
+  controller.init();
+  controller.destroy();
+  controller.destroy();
+  featureEvents.click();
+  controller.init();
+
+  assert.equal(clickCount, 0);
+  assert.equal(cancelCount, 1);
+  assert.equal(removeCount, 1);
+  assert.equal(state.cityFeatureLayers.size, 0);
+  assert.equal(state.map, null);
+  assert.equal(state.cityDetailLayer, null);
+  assert.equal(state.activeCityViewId, null);
+});
+
+test("map controller validates collaborators and safely escapes marker HTML by default", async () => {
+  const { createMapController } = await import(mapCoreUrl);
+  assert.throws(() => createMapController(), /options/i);
+  assert.throws(() => createMapController({ L: {}, state: {}, callbacks: { queueCityClick: "no" } }), /queueCityClick.*function/i);
+  assert.throws(() => createMapController({ L: {}, state: {}, helpers: { escapeHtml: 42 } }), /escapeHtml.*function/i);
+  assert.throws(() => createMapController({ L: {}, state: {}, elements: { mobileViewButtons: {} } }), /mobileViewButtons.*array/i);
+
+  const iconHtml = [];
+  const bounds = { extend() { return this; }, isValid() { return false; }, pad() { return this; } };
+  const layer = { clearLayers() {}, addTo() { return this; } };
+  const L = {
+    latLngBounds() { return bounds; },
+    marker(point, options) {
+      iconHtml.push(options.icon.html);
+      return { bindTooltip() { return this; }, bindPopup() { return this; }, addTo() { return this; } };
+    },
+    divIcon(options) { return options; }
+  };
+  const state = {
+    map: { hasLayer() { return true; }, removeLayer() {} }, cityDetailLayer: layer,
+    cities: [], routes: [], cityById: new Map(), placeById: new Map(), chinaLayer: null, routeLayer: null, cityLayer: null, labelLayer: null
+  };
+  const controller = createMapController({ L, state });
+  const session = controller.enterCityView("unsafe");
+  controller.renderCityDetail({
+    session,
+    city: { id: "unsafe" },
+    landmarks: [{
+      name: `<img src=x onerror=alert(1)>`, lat: 1, lon: 2,
+      type: `scenic\" onmouseover=alert(1)`, symbol: `<script>alert(1)</script>`, typeLabel: "type", popupHtml: "safe"
+    }]
+  });
+
+  assert.ok(iconHtml.length >= 2);
+  assert.doesNotMatch(iconHtml.join(""), /<script|<img|onmouseover=/i);
+  assert.match(iconHtml.join(""), /&lt;script&gt;|&lt;img/);
 });
