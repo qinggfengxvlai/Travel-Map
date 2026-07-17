@@ -50,6 +50,27 @@ function functionSource(source, name) {
   assert.fail(`expected complete ${name} function body`);
 }
 
+function arrowCallCallbackSource(source, callName) {
+  const signature = new RegExp(`\\b${callName}\\s*\\(\\s*\\(\\s*\\)\\s*=>\\s*\\{`);
+  const match = signature.exec(source);
+  assert.ok(match, `expected ${callName} arrow callback`);
+  const bodyStart = match.index + match[0].lastIndexOf("{");
+  let depth = 0;
+  for (let index = bodyStart; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    if (source[index] === "}") depth -= 1;
+    if (depth === 0) return source.slice(bodyStart, index + 1);
+  }
+  assert.fail(`expected complete ${callName} arrow callback body`);
+}
+
+test("arrow callback extraction excludes statements after the scheduled callback", () => {
+  const incorrectStartup = "scheduleIdle(() => {}); hydrateDeferredSummaries();";
+  const callback = arrowCallCallbackSource(incorrectStartup, "scheduleIdle");
+
+  assert.doesNotMatch(callback, /hydrateDeferredSummaries/);
+});
+
 test("static page exposes each calendar planner control exactly once", async () => {
   const html = await readFile(htmlUrl, "utf8");
 
@@ -155,6 +176,18 @@ test("app renders critical map data before hydrating optional summaries", async 
     app,
     /import\s*\{[\s\S]*?createJsonLoader[\s\S]*?createDeferredDataLoaders[\s\S]*?loadCriticalMapData[\s\S]*?scheduleIdle[\s\S]*?\}\s*from\s*["']\.\/app-data\.js["']/
   );
+  assert.match(
+    app,
+    /const\s*\{\s*loadJson\s*,\s*loadOptionalJson\s*\}\s*=\s*createJsonLoader\s*\(\s*\)\s*;/
+  );
+  assert.match(
+    app,
+    /const\s+deferredData\s*=\s*createDeferredDataLoaders\s*\(\s*\{\s*loadOptionalJson\s*\}\s*\)\s*;/
+  );
+  assert.doesNotMatch(
+    app,
+    /\b(?:async\s+)?function\s+(?:loadJson|loadOptionalJson)\s*\(/
+  );
 
   const loadMapData = functionSource(app, "loadMapData");
   assert.match(loadMapData, /await\s+loadCriticalMapData\s*\(\s*\{\s*loadJson\s*\}\s*\)/);
@@ -193,7 +226,12 @@ test("app renders critical map data before hydrating optional summaries", async 
     assert.ok(index > previousIndex, `expected ${step} after the previous startup step`);
     previousIndex = index;
   }
-  assert.match(initApp, /hydrateDeferredSummaries\s*\(\s*\)[\s\S]*?finally\s*\([\s\S]*?dataset\.appReady\s*=\s*["']complete["']/);
+  const idleCallback = arrowCallCallbackSource(initApp, "scheduleIdle");
+  assert.match(idleCallback, /hydrateDeferredSummaries\s*\(\s*\)/);
+  assert.match(
+    idleCallback,
+    /hydrateDeferredSummaries\s*\(\s*\)[\s\S]*?\.finally\s*\([\s\S]*?dataset\.appReady\s*=\s*["']complete["']/
+  );
   assert.match(initApp, /shouldRetryTripRestoreAfterCountyHydration\s*=\s*!state\.tripPlan/);
   assert.match(app, /failedBoundaryPaths:\s*\[\]/);
   assert.match(loadMapData, /state\.failedBoundaryPaths\s*=/);
