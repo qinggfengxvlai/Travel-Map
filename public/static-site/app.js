@@ -62,7 +62,8 @@ import {
   createPlaceIndex,
   hydrateCountySummary as mergeCountyRecords,
   normalizeKey,
-  normalizeSearchText
+  normalizeSearchText,
+  upsertRuntimePlaces
 } from "./place-index.js";
 
 const tripArchiveStorage = createLazyStorageAdapter(() => window.localStorage);
@@ -2927,7 +2928,8 @@ function districtPlaceFromFeature(city, feature) {
     placeType: "county"
   };
 
-  state.placeById.set(place.id, place);
+  upsertRuntimePlaces(placeIndex, [place]);
+  syncPlaceIndex();
   return place;
 }
 

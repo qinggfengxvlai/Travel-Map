@@ -28,7 +28,8 @@ test("exposes only the stable place-index API", () => {
     "createPlaceIndex",
     "hydrateCountySummary",
     "normalizeKey",
-    "normalizeSearchText"
+    "normalizeSearchText",
+    "upsertRuntimePlaces"
   ]);
 });
 
@@ -88,6 +89,97 @@ test("hydrates counties idempotently, deduplicates by id, and preserves cities",
   assert.equal(index.counties.filter((county) => county.id === "county-1").length, 1);
   assert.equal(index.placeById.get("county-1").name, "测试县（新）");
   assert.equal(index.placeById.get("beijing").placeType, "city");
+});
+
+test("runtime places survive cross-city county hydration without entering canonical collections", () => {
+  const index = createPlaceIndex({ cities, counties: [], municipalityChildren });
+  const runtimeA = {
+    id: "beijing-district-runtime-a",
+    name: "运行时甲区",
+    parentCityId: "beijing",
+    lon: 116.5,
+    lat: 39.8,
+    placeType: "county"
+  };
+
+  placeIndexModule.upsertRuntimePlaces(index, [runtimeA]);
+  hydrateCountySummary(index, [{
+    id: "lvliang-county-b",
+    name: "乙县",
+    pinyin: "Yixian",
+    parentCityId: "lvliang",
+    parentCityName: "吕梁"
+  }]);
+
+  assert.equal(index.placeById.get(runtimeA.id).name, runtimeA.name);
+  assert.equal(index.placeById.get("lvliang-county-b").name, "乙县");
+  assert.equal(index.cityById.get("beijing").id, "beijing");
+  assert.equal(index.cityById.get("lvliang").id, "lvliang");
+  assert.equal(index.counties.some((county) => county.id === runtimeA.id), false);
+
+  placeIndexModule.upsertRuntimePlaces(index, [{
+    id: "lvliang-county-b",
+    name: "运行时乙县详情",
+    lon: 111.2,
+    lat: 37.6,
+    placeType: "county"
+  }]);
+  assert.equal(index.placeById.get("lvliang-county-b").name, "运行时乙县详情");
+  assert.equal(index.counties.find((county) => county.id === "lvliang-county-b").name, "乙县");
+
+  placeIndexModule.upsertRuntimePlaces(index, [{
+    id: "beijing",
+    name: "不能覆盖城市",
+    placeType: "county"
+  }]);
+  assert.equal(index.placeById.get("beijing").name, cities[0].name);
+  assert.equal(index.cityById.get("beijing").name, cities[0].name);
+});
+
+test("same-id raw county records merge before deriving searchable identity", () => {
+  const index = createPlaceIndex({
+    cities,
+    municipalityChildren: [],
+    counties: [
+      {
+        id: "county-raw-merge",
+        name: "旧县",
+        pinyin: "Jiuxian",
+        province: "山西",
+        parentCityId: "lvliang",
+        parentCityName: "吕梁",
+        parentCityPinyin: "Lvliang"
+      },
+      { id: "county-raw-merge", name: "新县" }
+    ]
+  });
+
+  const county = index.placeById.get("county-raw-merge");
+  assert.equal(county.name, "新县");
+  assert.equal(county.pinyin, "Jiuxian");
+  assert.match(county.searchText, /新县/);
+  assert.match(county.searchText, /jiuxian/);
+  assert.match(county.searchText, /吕梁/);
+  assert.match(county.searchText, /lvliang/);
+});
+
+test("only non-empty string search text overrides derived county search text", () => {
+  for (const [id, searchText] of [["blank", "   "], ["null", null], ["number", 42]]) {
+    const index = createPlaceIndex({
+      cities,
+      municipalityChildren: [],
+      counties: [{ id, name: `派生${id}县`, pinyin: "Derived", parentCityName: "北京", searchText }]
+    });
+    assert.match(index.placeById.get(id).searchText, /derived/);
+    assert.match(index.placeById.get(id).searchText, /北京/);
+  }
+
+  const explicit = createPlaceIndex({
+    cities,
+    municipalityChildren: [],
+    counties: [{ id: "explicit", name: "显式县", searchText: " custom-search " }]
+  });
+  assert.equal(explicit.placeById.get("explicit").searchText, " custom-search ");
 });
 
 test("county replacement recomputes derived search text and retains omitted fields", () => {

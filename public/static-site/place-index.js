@@ -50,7 +50,7 @@ function buildMunicipalityCountyEntries(children, displayCities) {
 
 function normalizeCountyRecord(county) {
   if (!county || typeof county !== "object" || !county.id) return null;
-  const hasSearchText = Object.prototype.hasOwnProperty.call(county, "searchText");
+  const hasSearchText = typeof county.searchText === "string" && county.searchText.trim().length > 0;
   return {
     ...county,
     placeType: "county",
@@ -128,17 +128,43 @@ function buildCityProvinceKeyMap(cities, municipalityChildren = []) {
 function deduplicateCounties(counties) {
   const byId = new Map();
   (Array.isArray(counties) ? counties : []).forEach((county) => {
-    const normalized = normalizeCountyRecord(county);
-    if (!normalized) return;
-    const existing = byId.get(normalized.id) || {};
-    byId.set(normalized.id, normalizeCountyRecord({ ...existing, ...normalized }));
+    if (!county || typeof county !== "object" || !county.id) return;
+    const existing = byId.get(county.id);
+    const hasOwnSearchText = Object.prototype.hasOwnProperty.call(county, "searchText");
+    const hasValidSearchText = typeof county.searchText === "string" && county.searchText.trim().length > 0;
+    const identityChanged = !existing || [
+      "name",
+      "pinyin",
+      "province",
+      "parentCityId",
+      "parentCityName",
+      "parentCityPinyin"
+    ].some((field) => (
+      Object.prototype.hasOwnProperty.call(county, field) && county[field] !== existing[field]
+    ));
+    const merged = { ...(existing || {}), ...county };
+    if ((hasOwnSearchText && !hasValidSearchText) || (!hasValidSearchText && identityChanged)) {
+      delete merged.searchText;
+    }
+    byId.set(county.id, merged);
   });
-  return Array.from(byId.values());
+  return Array.from(byId.values()).map(normalizeCountyRecord).filter(Boolean);
 }
 
 function rebuildDerivedIndexes(index) {
   index.cityById = new Map(index.cities.map((city) => [city.id, city]));
-  index.placeById = buildPlaceMap(index.cities, index.counties);
+  const placeById = buildPlaceMap(index.cities, index.counties);
+  index.runtimePlaces.forEach((runtimePlace, id) => {
+    const canonical = placeById.get(id);
+    if (canonical && canonical.placeType === "city") return;
+    placeById.set(id, {
+      ...(canonical || {}),
+      ...runtimePlace,
+      id,
+      placeType: runtimePlace.placeType || (canonical && canonical.placeType) || "runtime"
+    });
+  });
+  index.placeById = placeById;
   index.cityByKey = buildCityKeyMap(index.cities, index.municipalityChildren);
   index.cityByProvinceKey = buildCityProvinceKeyMap(index.cities, index.municipalityChildren);
   index.cityKeyEntries = Array.from(index.cityByKey.entries()).sort((a, b) => b[0].length - a[0].length);
@@ -159,40 +185,38 @@ export function createPlaceIndex({ cities, counties, municipalityChildren = [] }
   const index = {
     cities: cityList,
     counties: deduplicateCounties([...municipalityCounties, ...(Array.isArray(counties) ? counties : [])]),
-    municipalityChildren: children
+    municipalityChildren: children,
+    runtimePlaces: new Map()
   };
   return rebuildDerivedIndexes(index);
+}
+
+export function upsertRuntimePlaces(index, records) {
+  if (!index || !Array.isArray(index.cities) || !(index.runtimePlaces instanceof Map)) {
+    throw new TypeError("A valid place index is required");
+  }
+  const upserted = [];
+  (Array.isArray(records) ? records : []).forEach((record) => {
+    if (!record || typeof record !== "object" || !record.id || index.cityById.has(record.id)) return;
+    const runtimePlace = {
+      ...(index.runtimePlaces.get(record.id) || {}),
+      ...record
+    };
+    index.runtimePlaces.set(record.id, runtimePlace);
+    upserted.push(runtimePlace);
+  });
+  rebuildDerivedIndexes(index);
+  return upserted;
 }
 
 export function hydrateCountySummary(index, records) {
   if (!index || !Array.isArray(index.cities)) {
     throw new TypeError("A valid place index is required");
   }
-  const byId = new Map(index.counties.map((county) => [county.id, county]));
-  const merged = [];
-  const identityFields = [
-    "name",
-    "pinyin",
-    "province",
-    "parentCityId",
-    "parentCityName",
-    "parentCityPinyin"
-  ];
-  (Array.isArray(records) ? records : []).forEach((record) => {
-    if (!record || typeof record !== "object" || !record.id) return;
-    const existing = byId.get(record.id);
-    const hasIncomingSearchText = Object.prototype.hasOwnProperty.call(record, "searchText");
-    const identityChanged = !existing || identityFields.some((field) => (
-      Object.prototype.hasOwnProperty.call(record, field) && record[field] !== existing[field]
-    ));
-    const candidate = { ...(existing || {}), ...record };
-    if (!hasIncomingSearchText && identityChanged) delete candidate.searchText;
-    const normalized = normalizeCountyRecord(candidate);
-    if (!normalized) return;
-    byId.set(normalized.id, normalized);
-    merged.push(normalized);
-  });
-  index.counties = deduplicateCounties(Array.from(byId.values()));
+  const validRecords = (Array.isArray(records) ? records : [])
+    .filter((record) => record && typeof record === "object" && record.id);
+  index.counties = deduplicateCounties([...index.counties, ...validRecords]);
   rebuildDerivedIndexes(index);
-  return merged;
+  const countyById = new Map(index.counties.map((county) => [county.id, county]));
+  return validRecords.map((record) => countyById.get(record.id)).filter(Boolean);
 }

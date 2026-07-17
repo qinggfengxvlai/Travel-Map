@@ -306,6 +306,16 @@ test("app renders critical map data before hydrating optional summaries", async 
   assert.match(app, /loadOptionalJson\s*\(\s*`\.\/data\/food-articles\/by-city\/\$\{cityId\}\.json`/);
 });
 
+test("app persists runtime district places through the place index overlay", async () => {
+  const app = await readFile(appUrl, "utf8");
+  const districtFactory = functionSource(app, "districtPlaceFromFeature");
+
+  assert.match(app, /\bupsertRuntimePlaces\b/);
+  assert.match(districtFactory, /upsertRuntimePlaces\s*\(\s*placeIndex\s*,\s*\[\s*place\s*\]\s*\)/);
+  assert.match(districtFactory, /syncPlaceIndex\s*\(\s*\)/);
+  assert.doesNotMatch(districtFactory, /state\.placeById\.set\s*\(/);
+});
+
 test("app wires deferred recovery, merge precedence, retryability and readiness policies", async () => {
   const app = await readFile(appUrl, "utf8");
   const prepareMigration = functionSource(app, "prepareTripMigration");
