@@ -51,12 +51,9 @@ export function createJsonLoader({ fetchImpl = fetch, version = ASSET_VERSION } 
   return { loadJson, loadOptionalJson };
 }
 
-export async function loadCriticalMapData({
-  loadJson,
-  boundaryChunkCount = PREFECTURE_CHUNK_COUNT
-}) {
+export async function loadCriticalMapData({ loadJson }) {
   const boundaryPaths = Array.from(
-    { length: boundaryChunkCount },
+    { length: PREFECTURE_CHUNK_COUNT },
     (_, index) => `./data/china-prefectures-lite-${index + 1}.json`
   );
   const requestOptions = { retries: 1, timeoutMs: 20_000 };
