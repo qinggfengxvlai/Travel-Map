@@ -189,6 +189,47 @@ test("controller retries invalid city chunks and renders safe local article asse
   assert.match(markers[0].popupHtml, /\.\/covers\/local\.jpg/);
 });
 
+test("hostile article day and title cannot create executable food card or popup markup", () => {
+  const places = knownPlaces("hangzhou");
+  const elements = fakePanelElements();
+  const hostileMarkup = `<img src=x onerror=alert(1)>`;
+  const controller = createFoodController({
+    state: { placeById: places },
+    elements,
+    helpers: { normalizeSearchText }
+  });
+
+  controller.hydrateSummary({ articles: [
+    article({ id: "hostile", day: hostileMarkup, title: hostileMarkup }),
+    article({ id: "day-ten", day: 10, title: "杭州面馆" }),
+    article({ id: "day-three", day: 3, title: "杭州小笼包" })
+  ] });
+
+  assert.deepEqual(
+    controller.articlesForCity("hangzhou").map(({ id }) => id),
+    ["hostile", "day-three", "day-ten"],
+    "invalid days use the undated sort position while finite days retain numeric order"
+  );
+
+  controller.renderPanel({ selected: places.get("hangzhou"), viewMode: "china", activeCityViewId: null });
+  const panelHtml = elements.articleList.children.map(({ innerHTML }) => innerHTML).join("");
+  assert.doesNotMatch(panelHtml, /<img[^>]*onerror/i);
+  assert.match(panelHtml, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(panelHtml, /第 3 天/);
+  assert.match(panelHtml, /第 10 天/);
+  assert.match(panelHtml, /杭州小笼包/);
+
+  const markers = controller.renderMarkers(controller.articlesForCity("hangzhou"));
+  const hostileMarker = markers.find(({ title }) => title === hostileMarkup);
+  const normalMarker = markers.find(({ title }) => title === "杭州小笼包");
+  assert.ok(hostileMarker, "marker descriptors retain title as text for final-sink escaping");
+  assert.doesNotMatch(hostileMarker.popupHtml, /<img[^>]*onerror/i);
+  assert.match(hostileMarker.popupHtml, /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(hostileMarker.popupHtml, /食行记/);
+  assert.match(normalMarker.popupHtml, /第 3 天/);
+  assert.match(normalMarker.popupHtml, /杭州小笼包/);
+});
+
 test("controller coalesces concurrent city loads and ignores stale completion without marking the city loaded", async () => {
   let resolve;
   let requests = 0;

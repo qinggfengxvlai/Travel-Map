@@ -8,6 +8,17 @@ function defaultEscapeHtml(value) {
   })[char]);
 }
 
+function finiteArticleDay(value) {
+  if (typeof value === "string" && !value.trim()) return null;
+  const day = Number(value);
+  return Number.isFinite(day) && day > 0 ? day : null;
+}
+
+function articleDayLabel(value) {
+  const day = finiteArticleDay(value);
+  return day === null ? "食行记" : `第 ${day} 天`;
+}
+
 function isFoodPayload(value) {
   return Boolean(value) && typeof value === "object" && Array.isArray(value.articles);
 }
@@ -92,7 +103,8 @@ export function createFoodStore({ knownPlaces, normalizeSearchText }) {
 
       if (!acceptedRecord) return store;
       store.articles = Array.from(mergedById.values()).sort((left, right) => (
-        Number(left.day || 0) - Number(right.day || 0) || (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
+        (finiteArticleDay(left.day) || 0) - (finiteArticleDay(right.day) || 0) ||
+        (left.id < right.id ? -1 : left.id > right.id ? 1 : 0)
       ));
       rebuildIndexes();
       return store;
@@ -222,7 +234,7 @@ export function createFoodController({ state, elements = {}, data = {}, helpers 
     return `
       <article class="food-popup">
         ${cover}
-        <p class="food-popup-kicker">${article.day ? `第 ${article.day} 天` : "食行记"} · ${escapeHtml(article.locationText || article.cityName || "")}</p>
+        <p class="food-popup-kicker">${articleDayLabel(article.day)} · ${escapeHtml(article.locationText || article.cityName || "")}</p>
         <h3>${escapeHtml(article.title || "")}</h3>
         <p>${escapeHtml(article.description || "")}</p>
         <div class="food-tags">${foods}</div>
@@ -272,7 +284,7 @@ export function createFoodController({ state, elements = {}, data = {}, helpers 
       card.innerHTML = `
         <a class="food-card-media" href="${escapeHtml(readerPath)}" target="_blank" rel="noopener">${cover}</a>
         <div class="food-card-body">
-          <p>${item.day ? `第 ${item.day} 天` : "食行记"} · ${escapeHtml(item.locationText || item.cityName || "")}</p>
+          <p>${articleDayLabel(item.day)} · ${escapeHtml(item.locationText || item.cityName || "")}</p>
           <h3><a href="${escapeHtml(readerPath)}" target="_blank" rel="noopener">${escapeHtml(item.title || "")}</a></h3>
           <span>${escapeHtml((item.foods || []).slice(0, 5).join("、") || item.description || "")}</span>
         </div>
@@ -291,7 +303,7 @@ export function createFoodController({ state, elements = {}, data = {}, helpers 
         placeOffsets.set(item.placeId, offsetIndex + 1);
         const offset = foodMarkerOffset(offsetIndex);
         return {
-          title: item.title,
+          title: String(item.title || ""),
           lat: Number(item.lat) + offset.lat,
           lon: Number(item.lon) + offset.lon,
           popupHtml: popupHtml(item)

@@ -163,7 +163,7 @@ export function createMapController(options) {
         state.featureCityIds.set(layer, city.id);
         state.cityFeatureLayers.set(city.id, layer);
         state.cityAdcodes.set(city.id, String(feature.properties.id || feature.properties.adcode || ""));
-        layer.bindTooltip(`${city.name} / ${city.province}`, {
+        layer.bindTooltip(escapeHtml(`${city.name} / ${city.province}`), {
           className: "city-tooltip",
           direction: "center",
           opacity: 0.95,
@@ -190,7 +190,7 @@ export function createMapController(options) {
         renderer: state.canvasRenderer,
         bubblingMouseEvents: false
       });
-      marker.bindTooltip(`${city.name} / ${city.province}`, {
+      marker.bindTooltip(escapeHtml(`${city.name} / ${city.province}`), {
         className: "city-tooltip",
         direction: "top",
         offset: [0, -8],
@@ -463,7 +463,7 @@ export function createMapController(options) {
         onEachFeature: (feature, layer) => {
           const district = districtByFeature.get(feature) || {};
           const name = district.name || feature.properties?.name || "下辖区域";
-          layer.bindTooltip(`${name} / ${city.name}`, {
+          layer.bindTooltip(escapeHtml(`${name} / ${city.name}`), {
             className: "city-tooltip",
             direction: "center",
             opacity: 0.96,
@@ -498,7 +498,7 @@ export function createMapController(options) {
           fillOpacity: 0.95,
           interactive: true
         })
-          .bindTooltip(`${area.name} / ${city.name}`, {
+          .bindTooltip(escapeHtml(`${area.name} / ${city.name}`), {
             className: "city-tooltip",
             direction: "top",
             offset: [0, -8],
@@ -521,7 +521,7 @@ export function createMapController(options) {
           iconAnchor: [9, 9]
         })
       })
-        .bindTooltip(`${landmark.name} / ${landmark.typeLabel}`, {
+        .bindTooltip(escapeHtml(`${landmark.name} / ${landmark.typeLabel}`), {
           className: "city-tooltip",
           direction: "top",
           offset: [0, -8],
@@ -547,7 +547,7 @@ export function createMapController(options) {
           iconAnchor: [10, 10]
         })
       })
-        .bindTooltip(`${station.name} / 火车站`, {
+        .bindTooltip(escapeHtml(`${station.name} / 火车站`), {
           className: "city-tooltip",
           direction: "top",
           offset: [0, -8],
@@ -582,7 +582,7 @@ export function createMapController(options) {
         lineCap: "round",
         lineJoin: "round"
       })
-        .bindTooltip(`${line.name} / 地铁线路`, {
+        .bindTooltip(escapeHtml(`${line.name} / 地铁线路`), {
           className: "city-tooltip",
           direction: "top",
           opacity: 1,
@@ -602,7 +602,7 @@ export function createMapController(options) {
         fillOpacity: 0.96,
         opacity: 1
       })
-        .bindTooltip(`${station.name} / ${station.lineName ? `${station.lineName} ` : ""}地铁站`, {
+        .bindTooltip(escapeHtml(`${station.name} / ${station.lineName ? `${station.lineName} ` : ""}地铁站`), {
           className: "city-tooltip",
           direction: "top",
           offset: [0, -8],
@@ -623,7 +623,7 @@ export function createMapController(options) {
           iconAnchor: [11, 11]
         })
       })
-        .bindTooltip(`${food.title} / 食行记`, {
+        .bindTooltip(escapeHtml(`${food.title} / 食行记`), {
           className: "city-tooltip",
           direction: "top",
           offset: [0, -8],

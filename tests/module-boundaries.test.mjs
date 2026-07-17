@@ -56,6 +56,8 @@ test("Leaflet ownership lives in the public map-core module", async () => {
     /function\s+(?:addGeoJson|addMarker|addPolyline|addCircleMarker|divIcon|fitBounds|createBounds|getZoom|flyTo)\s*\(/,
     "map-core must not expose generic Leaflet forwarding functions"
   );
+  assert.doesNotMatch(mapCoreSource, /\.bindTooltip\(\s*`/, "dynamic tooltip templates must be escaped at the Leaflet sink");
+  assert.match(mapCoreSource, /\.bindTooltip\(\s*escapeHtml\(/);
   for (const method of ["init", "fitChina", "renderRoutes", "updateCityStyles", "enterChinaView", "setMobileView", "destroy"]) {
     assert.match(mapCoreSource, new RegExp(`\\b${method}\\b`), `expected controller API to include ${method}`);
   }
@@ -413,19 +415,25 @@ test("destroy cancels callbacks, clears Leaflet references, and suppresses pendi
 
 test("map controller validates collaborators and safely escapes marker HTML by default", async () => {
   const { createMapController } = await import(mapCoreUrl);
+  const { createFoodController } = await import(foodContentUrl);
   assert.throws(() => createMapController(), /options/i);
   assert.throws(() => createMapController({ L: {}, state: {}, callbacks: { queueCityClick: "no" } }), /queueCityClick.*function/i);
   assert.throws(() => createMapController({ L: {}, state: {}, helpers: { escapeHtml: 42 } }), /escapeHtml.*function/i);
   assert.throws(() => createMapController({ L: {}, state: {}, elements: { mobileViewButtons: {} } }), /mobileViewButtons.*array/i);
 
   const iconHtml = [];
+  const tooltipHtml = [];
   const bounds = { extend() { return this; }, isValid() { return false; }, pad() { return this; } };
   const layer = { clearLayers() {}, addTo() { return this; } };
   const L = {
     latLngBounds() { return bounds; },
     marker(point, options) {
       iconHtml.push(options.icon.html);
-      return { bindTooltip() { return this; }, bindPopup() { return this; }, addTo() { return this; } };
+      return {
+        bindTooltip(value) { tooltipHtml.push(value); return this; },
+        bindPopup() { return this; },
+        addTo() { return this; }
+      };
     },
     divIcon(options) { return options; }
   };
@@ -433,6 +441,21 @@ test("map controller validates collaborators and safely escapes marker HTML by d
     map: { hasLayer() { return true; }, removeLayer() {} }, cityDetailLayer: layer,
     cities: [], routes: [], cityById: new Map(), placeById: new Map(), chinaLayer: null, routeLayer: null, cityLayer: null, labelLayer: null
   };
+  const foodPlaces = new Map([["unsafe", { id: "unsafe", placeType: "city", searchText: "unsafe" }]]);
+  const foodController = createFoodController({
+    state: { placeById: foodPlaces },
+    helpers: { normalizeSearchText: (value) => String(value || "").toLowerCase() }
+  });
+  foodController.hydrateSummary({ articles: [
+    {
+      id: "hostile-food", cityId: "unsafe", placeId: "unsafe",
+      title: `<img src=x onerror=alert(1)>`, day: `<img src=x onerror=alert(1)>`, lat: 3, lon: 4
+    },
+    {
+      id: "normal-food", cityId: "unsafe", placeId: "unsafe",
+      title: "杭州小笼包", day: 2, lat: 5, lon: 6
+    }
+  ] });
   const controller = createMapController({ L, state });
   const session = controller.enterCityView("unsafe");
   controller.renderCityDetail({
@@ -441,10 +464,14 @@ test("map controller validates collaborators and safely escapes marker HTML by d
     landmarks: [{
       name: `<img src=x onerror=alert(1)>`, lat: 1, lon: 2,
       type: `scenic\" onmouseover=alert(1)`, symbol: `<script>alert(1)</script>`, typeLabel: "type", popupHtml: "safe"
-    }]
+    }],
+    foodMarkers: foodController.renderMarkers(foodController.articlesForCity("unsafe"))
   });
 
   assert.ok(iconHtml.length >= 2);
   assert.doesNotMatch(iconHtml.join(""), /<script|<img|onmouseover=/i);
   assert.match(iconHtml.join(""), /&lt;script&gt;|&lt;img/);
+  assert.doesNotMatch(tooltipHtml.join(""), /<img[^>]*onerror/i);
+  assert.match(tooltipHtml.join(""), /&lt;img src=x onerror=alert\(1\)&gt;/);
+  assert.match(tooltipHtml.join(""), /杭州小笼包 \/ 食行记/);
 });
