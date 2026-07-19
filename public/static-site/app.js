@@ -6,15 +6,15 @@ import {
   isCountyRecordsPayload,
   loadCriticalMapData,
   scheduleIdle
-} from "./app-data.js";
+} from "./app-data.js?v=progressive-1";
 import {
   createPlaceIndex,
   hydrateCountySummary as mergeCountyRecords,
   normalizeKey,
   normalizeSearchText,
   upsertRuntimePlaces
-} from "./place-index.js";
-import { createMapController } from "./map-core.js";
+} from "./place-index.js?v=progressive-1";
+import { createMapController } from "./map-core.js?v=progressive-1";
 
 let LEGACY_TRIP_STORAGE_KEY;
 let TRIP_PLAN_VERSION;
@@ -74,7 +74,7 @@ let cityDetailModuleFailureReported = false;
 let cityDetailRefreshQueued = false;
 
 function loadTripControllerModule() {
-  tripControllerModulePromise ||= import("./trip-controller.js").then(async (module) => {
+  tripControllerModulePromise ||= import("./trip-controller.js?v=progressive-1").then(async (module) => {
     ({
       LEGACY_TRIP_STORAGE_KEY,
       TRIP_PLAN_VERSION,
@@ -139,7 +139,7 @@ function queueTripAction(action) {
 }
 
 function loadCityDetailModule() {
-  cityDetailModulePromise ||= import("./city-detail.js");
+  cityDetailModulePromise ||= import("./city-detail.js?v=progressive-1");
   return cityDetailModulePromise;
 }
 
@@ -203,7 +203,7 @@ function queueCityDetailModuleRefresh() {
 
 
 function loadFoodModule() {
-  foodModulePromise ||= import("./food-content.js");
+  foodModulePromise ||= import("./food-content.js?v=progressive-1");
   return foodModulePromise;
 }
 

@@ -1,4 +1,4 @@
-import { canMoveTripItemToDay, dayDate } from "./trip-plan.js";
+import { canMoveTripItemToDay, dayDate } from "./trip-plan.js?v=progressive-1";
 
 const WEEKDAYS = ["日", "一", "二", "三", "四", "五", "六"];
 const WARNING_LABELS = new Map([

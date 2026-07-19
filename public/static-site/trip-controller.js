@@ -1,15 +1,15 @@
-import * as tripPlan from "./trip-plan.js";
-import * as tripEditor from "./trip-editor.js";
-import * as tripArchive from "./trip-archive.js";
+import * as tripPlan from "./trip-plan.js?v=progressive-1";
+import * as tripEditor from "./trip-editor.js?v=progressive-1";
+import * as tripArchive from "./trip-archive.js?v=progressive-1";
 
-export * from "./trip-plan.js";
-export * from "./trip-editor.js";
-export * from "./trip-archive.js";
+export * from "./trip-plan.js?v=progressive-1";
+export * from "./trip-editor.js?v=progressive-1";
+export * from "./trip-archive.js?v=progressive-1";
 
 let guideModulePromise;
 
 export function loadGuideModule() {
-  guideModulePromise ||= import("./guide-export.js");
+  guideModulePromise ||= import("./guide-export.js?v=progressive-1");
   return guideModulePromise;
 }
 
