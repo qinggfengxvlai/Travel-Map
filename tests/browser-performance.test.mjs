@@ -38,13 +38,14 @@ test("map becomes usable before optional summaries finish", async ({ page }) => 
     await route.continue();
   });
 
-  await page.goto("/", { waitUntil: "domcontentloaded" });
+  const navigation = page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.locator("html")).toHaveAttribute("data-app-ready", "map");
   await expect(page.locator("#travelMap .leaflet-overlay-pane canvas")).toBeVisible();
   await expect(page.locator("#cityCount")).toHaveText("371");
   await expect(page.locator("#citySearch")).toBeEnabled();
 
   releaseDeferred();
+  await navigation;
   await expect(page.locator("html")).toHaveAttribute("data-app-ready", "complete");
   assertNoBrowserErrors();
 });
