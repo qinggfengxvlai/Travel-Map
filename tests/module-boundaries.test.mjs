@@ -14,8 +14,8 @@ test("food ownership lives behind one memoized dynamic import", async () => {
   const foodContentSource = await readFile(foodContentUrl, "utf8");
 
   await access(foodContentUrl);
-  assert.equal((appSource.match(/import\(\s*["']\.\/food-content\.js\?v=progressive-1["']\s*\)/g) ?? []).length, 1);
-  assert.match(appSource, /foodModulePromise\s*\|\|=\s*import\(\s*["']\.\/food-content\.js\?v=progressive-1["']\s*\)/);
+  assert.equal((appSource.match(/import\(\s*["']\.\/food-content\.js\?v=progressive-2["']\s*\)/g) ?? []).length, 1);
+  assert.match(appSource, /foodModulePromise\s*\|\|=\s*import\(\s*["']\.\/food-content\.js\?v=progressive-2["']\s*\)/);
   assert.doesNotMatch(appSource, /(?:^|\n)import[\s\S]*?from\s*["']\.\/food-content\.js["']/);
   assert.doesNotMatch(appSource, /function\s+(?:renderFoodPanel|foodArticlePopupHtml|normalizeFoodArticleRecord|mergeFoodArticleRecords|groupArticlesBy)\s*\(/);
   assert.doesNotMatch(appSource, /wechat-food-summary\.json/);
@@ -30,8 +30,8 @@ test("city detail owns live and local fallbacks behind one lazy module", async (
     readFile(cityDetailUrl, "utf8")
   ]);
 
-  assert.match(app, /cityDetailModulePromise\s*\|\|=\s*import\(["']\.\/city-detail\.js\?v=progressive-1["']\)/);
-  assert.equal((app.match(/import\(["']\.\/city-detail\.js\?v=progressive-1["']\)/g) || []).length, 1);
+  assert.match(app, /cityDetailModulePromise\s*\|\|=\s*import\(["']\.\/city-detail\.js\?v=progressive-2["']\)/);
+  assert.equal((app.match(/import\(["']\.\/city-detail\.js\?v=progressive-2["']\)/g) || []).length, 1);
   assert.doesNotMatch(app, /geo\.datav\.aliyun\.com|overpass-api\.de|metro-networks\.json|railway-stations-12306\.json/);
   assert.doesNotMatch(app, /const\s+(?:landmarkCatalog|stationCatalog|subwayStationCatalog)\s*=/);
   assert.doesNotMatch(app, /function\s+(?:fetchCityDistrictBoundaries|fetchTourismLandmarksFromOsm|fetchRailwayStationsFromOsm|fetchSubwayStationsFromOsm)\s*\(/);
@@ -86,15 +86,15 @@ test("trip domain and guide export stay behind the lazy trip controller", async 
     readFile(tripControllerUrl, "utf8")
   ]);
 
-  assert.match(app, /tripControllerModulePromise\s*\|\|=\s*import\(["']\.\/trip-controller\.js\?v=progressive-1["']\)/);
-  assert.equal((app.match(/import\(["']\.\/trip-controller\.js\?v=progressive-1["']\)/g) || []).length, 1);
+  assert.match(app, /tripControllerModulePromise\s*\|\|=\s*import\(["']\.\/trip-controller\.js\?v=progressive-2["']\)/);
+  assert.equal((app.match(/import\(["']\.\/trip-controller\.js\?v=progressive-2["']\)/g) || []).length, 1);
   for (const moduleName of ["trip-plan", "trip-editor", "trip-archive", "guide-export"]) {
     assert.doesNotMatch(app, new RegExp(`^import[\\s\\S]*?from ["']\\./${moduleName}\\.js["']`, "m"));
   }
   for (const moduleName of ["trip-plan", "trip-editor", "trip-archive"]) {
-    assert.match(tripController, new RegExp(`from ["']\\./${moduleName}\\.js\\?v=progressive-1["']`));
+    assert.match(tripController, new RegExp(`from ["']\\./${moduleName}\\.js\\?v=progressive-2["']`));
   }
-  assert.match(tripController, /guideModulePromise\s*\|\|=\s*import\(["']\.\/guide-export\.js\?v=progressive-1["']\)/);
+  assert.match(tripController, /guideModulePromise\s*\|\|=\s*import\(["']\.\/guide-export\.js\?v=progressive-2["']\)/);
   assert.match(tripController, /export\s+function\s+createTripController\s*\(/);
 });
 

@@ -2,7 +2,7 @@ import {
   LEGACY_TRIP_STORAGE_KEY,
   TRIP_STORAGE_KEY,
   compactTripPlan
-} from "./trip-plan.js?v=progressive-1";
+} from "./trip-plan.js?v=progressive-2";
 
 export const LEGACY_TRIP_BACKUP_KEY = "route-studio-trip-v1-backup";
 

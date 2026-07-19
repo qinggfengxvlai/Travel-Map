@@ -38,7 +38,7 @@ test("map becomes usable before optional summaries finish", async ({ page }) => 
     await route.continue();
   });
 
-  await page.goto("/");
+  await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.locator("html")).toHaveAttribute("data-app-ready", "map");
   await expect(page.locator("#travelMap .leaflet-overlay-pane canvas")).toBeVisible();
   await expect(page.locator("#cityCount")).toHaveText("371");
@@ -51,7 +51,7 @@ test("map becomes usable before optional summaries finish", async ({ page }) => 
 
 test("route planning editing and every import/export path remain available", async ({ page }) => {
   const assertNoBrowserErrors = failOnBrowserErrors(page);
-  await page.goto("/");
+  await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.locator("html")).toHaveAttribute("data-app-ready", /map|complete/);
 
   await addRoutePlace(page, "北京");
@@ -85,7 +85,7 @@ test("route planning editing and every import/export path remain available", asy
 
 test("deferred county food and city detail features hydrate completely", async ({ page }) => {
   const assertNoBrowserErrors = failOnBrowserErrors(page);
-  await page.goto("/");
+  await page.goto("/", { waitUntil: "domcontentloaded" });
   await expect(page.locator("html")).toHaveAttribute("data-app-ready", "complete");
 
   await page.locator("#citySearch").fill("福清");

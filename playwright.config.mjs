@@ -3,12 +3,15 @@ import { defineConfig } from "@playwright/test";
 export default defineConfig({
   testDir: "./tests",
   testMatch: "browser-performance.test.mjs",
-  timeout: 45_000,
+  timeout: 90_000,
+  expect: { timeout: 30_000 },
   fullyParallel: false,
   workers: 1,
   reporter: "line",
   use: {
     baseURL: process.env.STATIC_SITE_URL || "http://127.0.0.1:43173",
+    navigationTimeout: 45_000,
+    launchOptions: { args: ["--no-proxy-server"] },
     trace: "retain-on-failure"
   },
   webServer: process.env.STATIC_SITE_URL

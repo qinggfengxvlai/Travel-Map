@@ -164,7 +164,7 @@ test("static page loads the versioned app entry as a module", async () => {
 
   assert.match(
     html,
-    /<script\s+type=["']module["']\s+src=["']\.\/app\.js\?v=progressive-1["']><\/script>/
+    /<script\s+type=["']module["']\s+src=["']\.\/app\.js\?v=progressive-2["']><\/script>/
   );
 });
 
@@ -174,11 +174,11 @@ test("release assets use one immutable cache version", async () => {
   const sources = await Promise.all(applicationModuleUrls.map((url) => readFile(url, "utf8")));
   const importPattern = /(?:from\s*|import\(\s*)["'](\.\/[^"']+\.js(?:\?[^"']*)?)["']/g;
 
-  assert.match(html, /\.\/styles\.css\?v=progressive-1/);
-  assert.match(html, /\.\/app\.js\?v=progressive-1/);
+  assert.match(html, /\.\/styles\.css\?v=progressive-2/);
+  assert.match(html, /\.\/app\.js\?v=progressive-2/);
   for (const source of sources) {
     for (const [, specifier] of source.matchAll(importPattern)) {
-      assert.match(specifier, /\?v=progressive-1$/, `unversioned module import: ${specifier}`);
+      assert.match(specifier, /\?v=progressive-2$/, `unversioned module import: ${specifier}`);
     }
   }
   assert.match(nginx, /location\s*=\s*\/index\.html[\s\S]*?Cache-Control\s+"no-cache"/);
@@ -274,7 +274,7 @@ test("app renders critical map data before hydrating optional summaries", async 
 
   assert.match(
     app,
-    /import\s*\{[\s\S]*?createJsonLoader[\s\S]*?createDeferredDataLoaders[\s\S]*?loadCriticalMapData[\s\S]*?scheduleIdle[\s\S]*?\}\s*from\s*["']\.\/app-data\.js\?v=progressive-1["']/
+    /import\s*\{[\s\S]*?createJsonLoader[\s\S]*?createDeferredDataLoaders[\s\S]*?loadCriticalMapData[\s\S]*?scheduleIdle[\s\S]*?\}\s*from\s*["']\.\/app-data\.js\?v=progressive-2["']/
   );
   assert.match(
     app,
@@ -461,7 +461,7 @@ test("app delegates archive behavior through the lazy trip controller", async ()
   ];
 
   assert.doesNotMatch(app, /from\s+["']\.\/trip-archive\.js["']/);
-  assert.match(tripController, /from\s+["']\.\/trip-archive\.js\?v=progressive-1["']/);
+  assert.match(tripController, /from\s+["']\.\/trip-archive\.js\?v=progressive-2["']/);
   for (const api of archiveApis) {
     assert.ok((app.match(new RegExp(`\\b${api}\\b`, "g")) ?? []).length >= 2, `expected app.js to use ${api}`);
   }
@@ -489,7 +489,7 @@ test("app lazily builds one TripPlan v2 guide model and wires both guide rendere
   const tripController = await readFile(new URL("../public/static-site/trip-controller.js", import.meta.url), "utf8");
 
   assert.doesNotMatch(app, /from\s*["']\.\/guide-export\.js["']/);
-  assert.match(tripController, /import\s*\(\s*["']\.\/guide-export\.js\?v=progressive-1["']\s*\)/);
+  assert.match(tripController, /import\s*\(\s*["']\.\/guide-export\.js\?v=progressive-2["']\s*\)/);
   assert.match(app, /async\s+function\s+loadGuideModule\s*\([^)]*\)[\s\S]*?tripController\.loadGuideModule\s*\(/);
   assert.match(app, /querySelector\s*\(\s*["']#exportMarkdownBtn["']\s*\)/);
   assert.match(app, /querySelector\s*\(\s*["']#exportHtmlBtn["']\s*\)/);

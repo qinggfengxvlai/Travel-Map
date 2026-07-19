@@ -49,7 +49,7 @@ test("deferred module completion applies only the latest render and recomputes r
 });
 
 test("exports the progressive asset and boundary chunk versions", () => {
-  assert.equal(ASSET_VERSION, "progressive-1");
+  assert.equal(ASSET_VERSION, "progressive-2");
   assert.equal(PREFECTURE_CHUNK_COUNT, 8);
 });
 

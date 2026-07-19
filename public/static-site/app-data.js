@@ -1,4 +1,4 @@
-export const ASSET_VERSION = "progressive-1";
+export const ASSET_VERSION = "progressive-2";
 export const PREFECTURE_CHUNK_COUNT = 8;
 export const DEFERRED_DATASET_IDS = Object.freeze({
   counties: "counties-summary",

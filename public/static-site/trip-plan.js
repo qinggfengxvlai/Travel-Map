@@ -4,8 +4,21 @@ export const LEGACY_TRIP_STORAGE_KEY = "route-studio-trip-v1";
 const VALID_TRIP_PACES = new Set(["relaxed", "standard", "compact"]);
 const VALID_TRANSPORT_MODES = new Set(["highspeed", "train"]);
 
+let fallbackIdCounter = 0;
+
 function defaultIdFactory(prefix) {
-  return `${prefix}-${crypto.randomUUID()}`;
+  const secureUuid = globalThis.crypto?.randomUUID?.();
+  if (secureUuid) return `${prefix}-${secureUuid}`;
+
+  const randomPart = new Uint32Array(2);
+  if (globalThis.crypto?.getRandomValues) {
+    globalThis.crypto.getRandomValues(randomPart);
+  } else {
+    randomPart[0] = Math.floor(Math.random() * 0x100000000);
+    randomPart[1] = Math.floor(Math.random() * 0x100000000);
+  }
+  fallbackIdCounter += 1;
+  return `${prefix}-${Date.now().toString(36)}-${fallbackIdCounter.toString(36)}-${Array.from(randomPart, (value) => value.toString(36)).join("-")}`;
 }
 
 function blankDay(idFactory) {
