@@ -118,7 +118,7 @@ test("Leaflet ownership lives in the public map-core module", async () => {
   assert.match(cityDetailSource, /const\s+detailSession\s*=\s*mapController\.enterCityView\s*\(\s*city\.id\s*\)/);
   assert.match(
     cityDetailSource,
-    /await\s+loadCityDetail\s*\(\s*city\s*,\s*detailSession\s*\)[\s\S]*?isDetailSessionCurrent\s*\(\s*detailSession\s*\)[\s\S]*?exitCityViewBtn\.hidden\s*=\s*false/
+    /exitCityViewBtn\.hidden\s*=\s*false[\s\S]*?await\s+loadCityDetail\s*\(\s*city\s*,\s*detailSession\s*\)[\s\S]*?isDetailSessionCurrent\s*\(\s*detailSession\s*\)/
   );
   assert.match(cityDetailSource, /renderCityDetail\s*\(\s*\{\s*session:\s*detailSession,/);
   assert.match(appSource, /createMapController\s*\(\s*\{[\s\S]*?L:\s*window\.L[\s\S]*?state,[\s\S]*?callbacks:[\s\S]*?helpers:/);

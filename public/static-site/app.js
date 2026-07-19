@@ -2137,7 +2137,8 @@ function cancelQueuedCityClick() {
 async function enterCityView(cityId) {
   try {
     const controller = await loadCityDetailController();
-    return await controller.enter(cityId);
+    controller.enter(cityId).catch(reportCityDetailModuleFailure);
+    return true;
   } catch (error) {
     reportCityDetailModuleFailure(error);
     return false;

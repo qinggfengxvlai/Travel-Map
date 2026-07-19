@@ -395,9 +395,9 @@ export function createCityDetailController(options = {}) {
   
     const detailSession = mapController.enterCityView(city.id);
     if (!detailSession) return;
+    exitCityViewBtn.hidden = false;
     await loadCityDetail(city, detailSession);
     if (!mapController.isDetailSessionCurrent(detailSession)) return;
-    exitCityViewBtn.hidden = false;
     renderPanel();
   }
   
