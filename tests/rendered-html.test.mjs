@@ -280,14 +280,16 @@ test("app renders critical map data before hydrating optional summaries", async 
 
   const initApp = functionSource(app, "initApp");
   const startupSteps = [
+    "loadTripControllerModule()",
     "await loadMapData()",
     "createMapController({",
     "mapController.init()",
+    'document.documentElement.dataset.appReady = "map"',
+    "await tripModuleLoading",
     "restoreTripState()",
     'mapController.setMobileView("plan")',
     "mapController.renderRoutes()",
     "renderPanel()",
-    'document.documentElement.dataset.appReady = "map"',
     "queueFoodPanelRender()",
     "scheduleIdle("
   ];
@@ -404,8 +406,9 @@ test("lightweight prefecture boundaries retain every city within the startup bud
   assert.equal(chunks.reduce((total, data) => total + data.features.length, 0), 372);
 });
 
-test("app delegates archive behavior to the DOM-free trip archive module", async () => {
+test("app delegates archive behavior through the lazy trip controller", async () => {
   const app = await readFile(appUrl, "utf8");
+  const tripController = await readFile(new URL("../public/static-site/trip-controller.js", import.meta.url), "utf8");
   const archiveApis = [
     "LEGACY_TRIP_BACKUP_KEY",
     "backupLegacyTripRaw",
@@ -425,7 +428,8 @@ test("app delegates archive behavior to the DOM-free trip archive module", async
     "writeTripPlanV2"
   ];
 
-  assert.match(app, /from\s+["']\.\/trip-archive\.js["']/);
+  assert.doesNotMatch(app, /from\s+["']\.\/trip-archive\.js["']/);
+  assert.match(tripController, /from\s+["']\.\/trip-archive\.js["']/);
   for (const api of archiveApis) {
     assert.ok((app.match(new RegExp(`\\b${api}\\b`, "g")) ?? []).length >= 2, `expected app.js to use ${api}`);
   }
@@ -441,30 +445,29 @@ test("app wires visible trip import and JSON export controls", async () => {
   assert.match(app, /querySelector\s*\(\s*["']#tripImportInput["']\s*\)/);
   assert.match(app, /querySelector\s*\(\s*["']#exportTripFileBtn["']\s*\)/);
   assert.match(app, /tripImportBtn\.addEventListener\s*\(\s*["']click["'][\s\S]*?tripImportInput\.click\s*\(/);
-  assert.match(app, /tripImportInput\.addEventListener\s*\(\s*["']change["']\s*,\s*importTripFile\s*\)/);
-  assert.match(app, /exportTripFileBtn\.addEventListener\s*\(\s*["']click["']\s*,\s*exportTripFile\s*\)/);
+  assert.match(app, /tripImportInput\.addEventListener\s*\(\s*["']change["'][\s\S]*?queueTripAction\s*\(\s*\(\)\s*=>\s*importTripFile\s*\(\s*event\s*\)/);
+  assert.match(app, /exportTripFileBtn\.addEventListener\s*\(\s*["']click["'][\s\S]*?queueTripAction\s*\(\s*\(\)\s*=>\s*exportTripFile\s*\(\s*\)/);
   assert.match(app, /exportTripFileBtn\.disabled\s*=\s*!canExportTripFile\s*\(/);
   assert.match(app, /function\s+exportTripFile\s*\([^)]*\)[\s\S]*?tripFileExportPayload\s*\([\s\S]*?downloadTextFile\s*\(/);
   assert.match(app, /exportPayload\.kind\s*===\s*["']legacy-emergency["'][\s\S]*?clearEmergencyLegacyTrip\s*\(/);
 });
 
-test("app builds one TripPlan v2 guide model and wires both guide renderers", async () => {
+test("app lazily builds one TripPlan v2 guide model and wires both guide renderers", async () => {
   const app = await readFile(appUrl, "utf8");
+  const tripController = await readFile(new URL("../public/static-site/trip-controller.js", import.meta.url), "utf8");
 
-  assert.match(
-    app,
-    /import\s*\{\s*buildGuideModel\s*,\s*buildMarkdownGuide\s*,\s*buildPrintableHtml\s*\}\s*from\s*["']\.\/guide-export\.js["']/
-  );
-  assert.match(app, /\bsafeTripNameForFile\b[\s\S]*?from\s+["']\.\/trip-archive\.js["']/);
+  assert.doesNotMatch(app, /from\s*["']\.\/guide-export\.js["']/);
+  assert.match(tripController, /import\s*\(\s*["']\.\/guide-export\.js["']\s*\)/);
+  assert.match(app, /async\s+function\s+loadGuideModule\s*\([^)]*\)[\s\S]*?tripController\.loadGuideModule\s*\(/);
   assert.match(app, /querySelector\s*\(\s*["']#exportMarkdownBtn["']\s*\)/);
   assert.match(app, /querySelector\s*\(\s*["']#exportHtmlBtn["']\s*\)/);
   assert.match(
     app,
-    /exportMarkdownBtn\.addEventListener\s*\(\s*["']click["']\s*,\s*exportMarkdownGuide\s*\)/
+    /exportMarkdownBtn\.addEventListener\s*\(\s*["']click["'][\s\S]*?queueTripAction\s*\(\s*\(\)\s*=>\s*exportMarkdownGuide\s*\(\s*\)/
   );
   assert.match(
     app,
-    /exportHtmlBtn\.addEventListener\s*\(\s*["']click["']\s*,\s*exportPrintableHtmlGuide\s*\)/
+    /exportHtmlBtn\.addEventListener\s*\(\s*["']click["'][\s\S]*?queueTripAction\s*\(\s*\(\)\s*=>\s*exportPrintableHtmlGuide\s*\(\s*\)/
   );
 
   assert.equal(
@@ -474,15 +477,15 @@ test("app builds one TripPlan v2 guide model and wires both guide renderers", as
   );
   assert.match(
     app,
-    /function\s+buildCurrentGuideModel\s*\([^)]*\)\s*\{[\s\S]*?buildGuideModel\s*\(\s*\{[\s\S]*?plan:\s*state\.tripPlan[\s\S]*?placeSnapshots:[\s\S]*?warnings:\s*validateTripPlan\s*\(\s*plan\s*,\s*\{\s*paceProfile:\s*tripPaceProfile\s*\(\s*plan\.pace\s*\)[\s\S]*?routeSegments:[\s\S]*?totals:/
+    /async\s+function\s+buildCurrentGuideModel\s*\([^)]*\)\s*\{[\s\S]*?await\s+loadGuideModule\s*\(\s*\)[\s\S]*?buildGuideModel\s*\(\s*\{[\s\S]*?plan:\s*state\.tripPlan[\s\S]*?placeSnapshots:[\s\S]*?warnings:\s*validateTripPlan\s*\(\s*plan\s*,\s*\{\s*paceProfile:\s*tripPaceProfile\s*\(\s*plan\.pace\s*\)[\s\S]*?routeSegments:[\s\S]*?totals:/
   );
   assert.match(
     app,
-    /function\s+exportMarkdownGuide\s*\([^)]*\)\s*\{[\s\S]*?const\s+model\s*=\s*buildCurrentGuideModel\s*\(\s*\)[\s\S]*?buildMarkdownGuide\s*\(\s*model\s*\)[\s\S]*?downloadTextFile\s*\([\s\S]*?["']text\/markdown;charset=utf-8["']/
+    /async\s+function\s+exportMarkdownGuide\s*\([^)]*\)\s*\{[\s\S]*?await\s+loadGuideModule\s*\(\s*\)[\s\S]*?const\s+model\s*=\s*await\s+buildCurrentGuideModel\s*\(\s*\)[\s\S]*?buildMarkdownGuide\s*\(\s*model\s*\)[\s\S]*?downloadTextFile\s*\([\s\S]*?["']text\/markdown;charset=utf-8["']/
   );
   assert.match(
     app,
-    /function\s+exportPrintableHtmlGuide\s*\([^)]*\)\s*\{[\s\S]*?const\s+model\s*=\s*buildCurrentGuideModel\s*\(\s*\)[\s\S]*?buildPrintableHtml\s*\(\s*model\s*\)[\s\S]*?downloadTextFile\s*\([\s\S]*?["']text\/html;charset=utf-8["']/
+    /async\s+function\s+exportPrintableHtmlGuide\s*\([^)]*\)\s*\{[\s\S]*?await\s+loadGuideModule\s*\(\s*\)[\s\S]*?const\s+model\s*=\s*await\s+buildCurrentGuideModel\s*\(\s*\)[\s\S]*?buildPrintableHtml\s*\(\s*model\s*\)[\s\S]*?downloadTextFile\s*\([\s\S]*?["']text\/html;charset=utf-8["']/
   );
   assert.match(app, /exportMarkdownBtn\.disabled\s*=\s*!hasCalendar/);
   assert.match(app, /exportHtmlBtn\.disabled\s*=\s*!hasCalendar/);
@@ -497,7 +500,7 @@ test("app wires v2 writes, recovery and legacy lifecycle through archive transac
   const restore = functionSource(app, "restoreTripState");
   const importTrip = functionSource(app, "importTripFile");
 
-  assert.match(app, /const\s+tripArchiveStorage\s*=\s*createLazyStorageAdapter\s*\(\s*\(\)\s*=>\s*window\.localStorage\s*\)/);
+  assert.match(app, /tripArchiveStorage\s*\|\|=\s*createLazyStorageAdapter\s*\(\s*\(\)\s*=>\s*window\.localStorage\s*\)/);
   assert.doesNotMatch(app, /storage:\s*window\.localStorage/);
   assert.match(app, /writeTripPlanV2\s*\(\s*\{[\s\S]*?storage:\s*tripArchiveStorage[\s\S]*?currentUrl:\s*window\.location\.href[\s\S]*?replaceUrl:/);
   assert.match(app, /readTripRecoveryCandidates\s*\(\s*\{[\s\S]*?storage:\s*tripArchiveStorage/);

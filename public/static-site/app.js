@@ -1,54 +1,4 @@
 import {
-  LEGACY_TRIP_STORAGE_KEY,
-  TRIP_PLAN_VERSION,
-  TRIP_STORAGE_KEY,
-  applyTripCommand,
-  autoScheduleTrip,
-  createTripPlan,
-  dayDate,
-  migrateTripState,
-  normalizeTripPlan,
-  reconcileRoutePlaces,
-  resolveTripPace,
-  resolveTripTransportMode,
-  routePlaceIds,
-  shouldUseTripFile,
-  validateTripPlan
-} from "./trip-plan.js";
-import {
-  LEGACY_TRIP_BACKUP_KEY,
-  MissingTripPlacesError,
-  backupLegacyTripRaw,
-  canExportTripFile,
-  captureTripArchiveSnapshot,
-  clearTripArchive,
-  createLazyStorageAdapter,
-  finalizeLegacyMigration,
-  isLegacyTripPayload,
-  legacyMigrationPending,
-  prepareLegacyRecoveryData,
-  readTripRecoveryCandidates,
-  restoreTripArchiveSnapshot,
-  safeTripNameForFile,
-  selectTripRecoveryCandidate,
-  shareUrlForTrip,
-  tripFileExportPayload,
-  tripFileName,
-  tripFileText,
-  writeTripPlanV2
-} from "./trip-archive.js";
-import {
-  buildGuideModel,
-  buildMarkdownGuide,
-  buildPrintableHtml
-} from "./guide-export.js";
-import {
-  commandForTripItemForm,
-  mountTripEditor,
-  renderTripEditorMarkup,
-  restoreTripEditorFocus
-} from "./trip-editor.js";
-import {
   classifyDeferredSummaryData,
   createLatestAsyncRefresh,
   createJsonLoader,
@@ -66,7 +16,49 @@ import {
 } from "./place-index.js";
 import { createMapController } from "./map-core.js";
 
-const tripArchiveStorage = createLazyStorageAdapter(() => window.localStorage);
+let LEGACY_TRIP_STORAGE_KEY;
+let TRIP_PLAN_VERSION;
+let TRIP_STORAGE_KEY;
+let applyTripCommand;
+let autoScheduleTrip;
+let createTripPlan;
+let dayDate;
+let migrateTripState;
+let normalizeTripPlan;
+let reconcileRoutePlaces;
+let resolveTripPace;
+let resolveTripTransportMode;
+let routePlaceIds;
+let shouldUseTripFile;
+let validateTripPlan;
+let LEGACY_TRIP_BACKUP_KEY;
+let MissingTripPlacesError;
+let backupLegacyTripRaw;
+let canExportTripFile;
+let captureTripArchiveSnapshot;
+let clearTripArchive;
+let createLazyStorageAdapter;
+let finalizeLegacyMigration;
+let isLegacyTripPayload;
+let legacyMigrationPending;
+let prepareLegacyRecoveryData;
+let readTripRecoveryCandidates;
+let restoreTripArchiveSnapshot;
+let safeTripNameForFile;
+let selectTripRecoveryCandidate;
+let shareUrlForTrip;
+let tripFileExportPayload;
+let tripFileName;
+let tripFileText;
+let writeTripPlanV2;
+let commandForTripItemForm;
+let mountTripEditor;
+let renderTripEditorMarkup;
+let restoreTripEditorFocus;
+let tripArchiveStorage;
+let tripControllerModulePromise;
+let tripController;
+
 const { loadJson, loadOptionalJson } = createJsonLoader();
 const deferredData = createDeferredDataLoaders({ loadOptionalJson });
 let placeIndex = null;
@@ -80,6 +72,71 @@ let cityDetailControllerPromise;
 let cityDetailController = null;
 let cityDetailModuleFailureReported = false;
 let cityDetailRefreshQueued = false;
+
+function loadTripControllerModule() {
+  tripControllerModulePromise ||= import("./trip-controller.js").then(async (module) => {
+    ({
+      LEGACY_TRIP_STORAGE_KEY,
+      TRIP_PLAN_VERSION,
+      TRIP_STORAGE_KEY,
+      applyTripCommand,
+      autoScheduleTrip,
+      createTripPlan,
+      dayDate,
+      migrateTripState,
+      normalizeTripPlan,
+      reconcileRoutePlaces,
+      resolveTripPace,
+      resolveTripTransportMode,
+      routePlaceIds,
+      shouldUseTripFile,
+      validateTripPlan,
+      LEGACY_TRIP_BACKUP_KEY,
+      MissingTripPlacesError,
+      backupLegacyTripRaw,
+      canExportTripFile,
+      captureTripArchiveSnapshot,
+      clearTripArchive,
+      createLazyStorageAdapter,
+      finalizeLegacyMigration,
+      isLegacyTripPayload,
+      legacyMigrationPending,
+      prepareLegacyRecoveryData,
+      readTripRecoveryCandidates,
+      restoreTripArchiveSnapshot,
+      safeTripNameForFile,
+      selectTripRecoveryCandidate,
+      shareUrlForTrip,
+      tripFileExportPayload,
+      tripFileName,
+      tripFileText,
+      writeTripPlanV2,
+      commandForTripItemForm,
+      mountTripEditor,
+      renderTripEditorMarkup,
+      restoreTripEditorFocus
+    } = module);
+    tripArchiveStorage ||= createLazyStorageAdapter(() => window.localStorage);
+    tripController ||= module.createTripController();
+    await tripController.init();
+    return module;
+  });
+  return tripControllerModulePromise;
+}
+
+async function loadGuideModule() {
+  await loadTripControllerModule();
+  return tripController.loadGuideModule();
+}
+
+function queueTripAction(action) {
+  return loadTripControllerModule()
+    .then(action)
+    .catch((error) => {
+      console.error("trip module unavailable", error);
+      selectionHint.textContent = "\u884c\u7a0b\u529f\u80fd\u52a0\u8f7d\u5931\u8d25\uff0c\u8bf7\u5237\u65b0\u9875\u9762\u540e\u91cd\u8bd5\u3002";
+    });
+}
 
 function loadCityDetailModule() {
   cityDetailModulePromise ||= import("./city-detail.js");
@@ -531,6 +588,7 @@ function scoreSearchResult(item, query) {
 
 async function selectSearchResult(item) {
   if (!item || !state.map) return;
+  await loadTripControllerModule();
   const targetCityId = item.searchType === "county" ? item.parentCityId : item.id;
   const targetCity = cityById(targetCityId);
   if (!targetCity) return;
@@ -2059,7 +2117,9 @@ function queuePlaceClick(placeId) {
   if (state.pendingCityClickTimer) window.clearTimeout(state.pendingCityClickTimer);
   state.pendingCityClickTimer = window.setTimeout(() => {
     state.pendingCityClickTimer = null;
-    handlePlaceClick(placeId);
+    loadTripControllerModule()
+      .then(() => handlePlaceClick(placeId))
+      .catch((error) => console.error("trip controller unavailable", error));
   }, CITY_CLICK_DELAY_MS);
 }
 
@@ -2251,7 +2311,8 @@ function clearRoutes() {
   commitTripPlan(null, { recordHistory: false });
 }
 
-function buildCurrentGuideModel() {
+async function buildCurrentGuideModel() {
+  const { buildGuideModel } = await loadGuideModule();
   const plan = state.tripPlan;
   if (!Array.isArray(plan?.days) || !plan.days.length) {
     throw new TypeError("\u5f53\u524d\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u65e5\u5386\u884c\u7a0b");
@@ -2334,8 +2395,9 @@ async function exportMarkdownGuide() {
   }
   try {
     await ensureFoodModuleForTrip();
+    const { buildMarkdownGuide } = await loadGuideModule();
     const plan = state.tripPlan;
-    const model = buildCurrentGuideModel();
+    const model = await buildCurrentGuideModel();
     const markdown = buildMarkdownGuide(model);
     const filename = guideFileName(plan, "md");
     downloadTextFile(markdown, filename, "text/markdown;charset=utf-8");
@@ -2353,8 +2415,9 @@ async function exportPrintableHtmlGuide() {
   }
   try {
     await ensureFoodModuleForTrip();
+    const { buildPrintableHtml } = await loadGuideModule();
     const plan = state.tripPlan;
-    const model = buildCurrentGuideModel();
+    const model = await buildCurrentGuideModel();
     const html = buildPrintableHtml(model);
     const filename = guideFileName(plan, "html");
     downloadTextFile(html, filename, "text/html;charset=utf-8");
@@ -2421,6 +2484,7 @@ async function initApp() {
   try {
     selectionTitle.textContent = "\u6b63\u5728\u542f\u52a8 Leaflet Canvas";
     selectionHint.textContent = "\u6b63\u5728\u8bfb\u53d6\u672c\u5730 GeoJSON \u548c\u57ce\u5e02\u5750\u6807\u6570\u636e...";
+    const tripModuleLoading = loadTripControllerModule();
     await loadMapData();
     mapController = createMapController({
       L: window.L,
@@ -2456,12 +2520,13 @@ async function initApp() {
       }
     });
     mapController.init();
+    document.documentElement.dataset.appReady = "map";
+    await tripModuleLoading;
     const initialRecovery = restoreTripState();
     shouldRetryTripRestoreAfterCountyHydration = initialRecovery.status === "deferred";
     mapController.setMobileView("plan");
     mapController.renderRoutes();
     renderPanel();
-    document.documentElement.dataset.appReady = "map";
     queueFoodPanelRender();
     scheduleIdle(() => {
       loadCityDetailController().catch(reportCityDetailModuleFailure);
@@ -2478,31 +2543,36 @@ async function initApp() {
   }
 }
 
-undoBtn.addEventListener("click", undoRoute);
-clearBtn.addEventListener("click", clearRoutes);
+undoBtn.addEventListener("click", () => queueTripAction(() => undoRoute()));
+clearBtn.addEventListener("click", () => queueTripAction(() => clearRoutes()));
 resetViewBtn.addEventListener("click", resetMapView);
-if (saveTripBtn) saveTripBtn.addEventListener("click", () => persistTripState("\u5df2\u624b\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002"));
-if (shareTripBtn) shareTripBtn.addEventListener("click", copyShareLink);
+if (saveTripBtn) saveTripBtn.addEventListener("click", () => queueTripAction(() => persistTripState("\u5df2\u624b\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002")));
+if (shareTripBtn) shareTripBtn.addEventListener("click", () => queueTripAction(() => copyShareLink()));
 if (tripImportBtn && tripImportInput) {
   tripImportBtn.addEventListener("click", () => tripImportInput.click());
 }
-if (tripImportInput) tripImportInput.addEventListener("change", importTripFile);
-if (exportTripFileBtn) exportTripFileBtn.addEventListener("click", exportTripFile);
-if (exportMarkdownBtn) exportMarkdownBtn.addEventListener("click", exportMarkdownGuide);
-if (exportHtmlBtn) exportHtmlBtn.addEventListener("click", exportPrintableHtmlGuide);
+if (tripImportInput) tripImportInput.addEventListener("change", (event) => queueTripAction(() => importTripFile(event)));
+if (exportTripFileBtn) exportTripFileBtn.addEventListener("click", () => queueTripAction(() => exportTripFile()));
+if (exportMarkdownBtn) exportMarkdownBtn.addEventListener("click", () => queueTripAction(() => exportMarkdownGuide()));
+if (exportHtmlBtn) exportHtmlBtn.addEventListener("click", () => queueTripAction(() => exportPrintableHtmlGuide()));
 exitCityViewBtn.addEventListener("click", () => exitCityView());
-transportButtons.forEach((button) => button.addEventListener("click", () => setTransportMode(button.dataset.mode)));
-paceButtons.forEach((button) => button.addEventListener("click", () => setTripPace(button.dataset.pace)));
+transportButtons.forEach((button) => button.addEventListener("click", () => queueTripAction(() => setTransportMode(button.dataset.mode))));
+paceButtons.forEach((button) => button.addEventListener("click", () => queueTripAction(() => setTripPace(button.dataset.pace))));
 mobileViewButtons.forEach((button) => button.addEventListener("click", () => mapController?.setMobileView(button.dataset.mobileView)));
-if (tripNameInput) tripNameInput.addEventListener("change", updateTripNameMetadata);
-if (tripStartDateInput) tripStartDateInput.addEventListener("change", updateTripStartDateMetadata);
-if (autoScheduleBtn) autoScheduleBtn.addEventListener("click", autoScheduleCurrentTrip);
-if (undoTripEditBtn) undoTripEditBtn.addEventListener("click", undoTripEdit);
-if (tripItemForm) tripItemForm.addEventListener("submit", submitTripItemForm);
-if (tripItemCancelBtn) tripItemCancelBtn.addEventListener("click", () => closeTripItemDialog());
+if (tripNameInput) tripNameInput.addEventListener("change", () => queueTripAction(() => updateTripNameMetadata()));
+if (tripStartDateInput) tripStartDateInput.addEventListener("change", () => queueTripAction(() => updateTripStartDateMetadata()));
+if (autoScheduleBtn) autoScheduleBtn.addEventListener("click", () => queueTripAction(() => autoScheduleCurrentTrip()));
+if (undoTripEditBtn) undoTripEditBtn.addEventListener("click", () => queueTripAction(() => undoTripEdit()));
+if (tripItemForm) tripItemForm.addEventListener("submit", (event) => {
+  event.preventDefault();
+  queueTripAction(() => submitTripItemForm(event));
+});
+if (tripItemCancelBtn) tripItemCancelBtn.addEventListener("click", () => queueTripAction(() => closeTripItemDialog()));
 if (tripItemPlaceId) {
   tripItemPlaceId.addEventListener("change", () => {
-    if (tripFormControl("type")?.value === "activity") renderTripLandmarkOptions(tripItemPlaceId.value);
+    queueTripAction(() => {
+      if (tripFormControl("type")?.value === "activity") renderTripLandmarkOptions(tripItemPlaceId.value);
+    });
   });
 }
 citySearch.addEventListener("input", updateSearchResults);

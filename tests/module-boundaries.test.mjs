@@ -6,6 +6,7 @@ const mapCoreUrl = new URL("../public/static-site/map-core.js", import.meta.url)
 const appUrl = new URL("../public/static-site/app.js", import.meta.url);
 const foodContentUrl = new URL("../public/static-site/food-content.js", import.meta.url);
 const cityDetailUrl = new URL("../public/static-site/city-detail.js", import.meta.url);
+const tripControllerUrl = new URL("../public/static-site/trip-controller.js", import.meta.url);
 
 test("food ownership lives behind one memoized dynamic import", async () => {
   const appSource = await readFile(appUrl, "utf8");
@@ -77,6 +78,24 @@ test("city detail controller keeps curated fallbacks and shared county state ava
   assert.deepEqual(controller.subareas(city).map(({ id }) => id), ["xihu"]);
   assert.ok(controller.landmarks(city).some(({ name }) => name === "西湖"));
   assert.equal(controller.counts(city).subareas, 1);
+});
+
+test("trip domain and guide export stay behind the lazy trip controller", async () => {
+  const [app, tripController] = await Promise.all([
+    readFile(appUrl, "utf8"),
+    readFile(tripControllerUrl, "utf8")
+  ]);
+
+  assert.match(app, /tripControllerModulePromise\s*\|\|=\s*import\(["']\.\/trip-controller\.js["']\)/);
+  assert.equal((app.match(/import\(["']\.\/trip-controller\.js["']\)/g) || []).length, 1);
+  for (const moduleName of ["trip-plan", "trip-editor", "trip-archive", "guide-export"]) {
+    assert.doesNotMatch(app, new RegExp(`^import[\\s\\S]*?from ["']\\./${moduleName}\\.js["']`, "m"));
+  }
+  for (const moduleName of ["trip-plan", "trip-editor", "trip-archive"]) {
+    assert.match(tripController, new RegExp(`from ["']\\./${moduleName}\\.js["']`));
+  }
+  assert.match(tripController, /guideModulePromise\s*\|\|=\s*import\(["']\.\/guide-export\.js["']\)/);
+  assert.match(tripController, /export\s+function\s+createTripController\s*\(/);
 });
 
 test("Leaflet ownership lives in the public map-core module", async () => {
