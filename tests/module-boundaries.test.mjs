@@ -5,6 +5,7 @@ import test from "node:test";
 const mapCoreUrl = new URL("../public/static-site/map-core.js", import.meta.url);
 const appUrl = new URL("../public/static-site/app.js", import.meta.url);
 const foodContentUrl = new URL("../public/static-site/food-content.js", import.meta.url);
+const cityDetailUrl = new URL("../public/static-site/city-detail.js", import.meta.url);
 
 test("food ownership lives behind one memoized dynamic import", async () => {
   const appSource = await readFile(appUrl, "utf8");
@@ -22,11 +23,68 @@ test("food ownership lives behind one memoized dynamic import", async () => {
   assert.match(foodContentSource, /export\s+function\s+createFoodStore\s*\(/);
 });
 
+test("city detail owns live and local fallbacks behind one lazy module", async () => {
+  const [app, detail] = await Promise.all([
+    readFile(appUrl, "utf8"),
+    readFile(cityDetailUrl, "utf8")
+  ]);
+
+  assert.match(app, /cityDetailModulePromise\s*\|\|=\s*import\(["']\.\/city-detail\.js["']\)/);
+  assert.equal((app.match(/import\(["']\.\/city-detail\.js["']\)/g) || []).length, 1);
+  assert.doesNotMatch(app, /geo\.datav\.aliyun\.com|overpass-api\.de|metro-networks\.json|railway-stations-12306\.json/);
+  assert.doesNotMatch(app, /const\s+(?:landmarkCatalog|stationCatalog|subwayStationCatalog)\s*=/);
+  assert.doesNotMatch(app, /function\s+(?:fetchCityDistrictBoundaries|fetchTourismLandmarksFromOsm|fetchRailwayStationsFromOsm|fetchSubwayStationsFromOsm)\s*\(/);
+  assert.match(detail, /export\s+function\s+createCityDetailController\s*\(/);
+  for (const owner of [
+    "geo.datav.aliyun.com",
+    "overpass-api.de",
+    "metro-networks.json",
+    "railway-stations-12306.json"
+  ]) assert.match(detail, new RegExp(owner.replaceAll(".", "\\.")));
+  assert.doesNotMatch(detail, /from\s+["']\.\/app\.js["']/);
+});
+
+test("city detail controller keeps curated fallbacks and shared county state available", async () => {
+  const { createCityDetailController } = await import(cityDetailUrl);
+  const city = { id: "hangzhou", name: "杭州", province: "浙江", pinyin: "hangzhou", lon: 120.15, lat: 30.25 };
+  const county = { id: "xihu", name: "西湖区", parentCityId: city.id, lon: 120.12, lat: 30.26 };
+  const state = {
+    cities: [city], counties: [county], cityById: new Map([[city.id, city]]), cityAdcodes: new Map(),
+    cityFeatureLayers: new Map(), cityBoundaryCache: new Map(), stationCache: new Map(),
+    subwayStationCache: new Map(), landmarkCache: new Map(), loadedCountyCityIds: new Set(),
+    countyLoadPromises: new Map(), activeLandmarkCount: 0, activeStationCount: 0,
+    activeSubwayStationCount: 0
+  };
+  const noop = () => {};
+  const controller = createCityDetailController({
+    state,
+    mapController: { distanceBetween: () => 0, enterChinaView: noop },
+    callbacks: {
+      cityById: (id) => state.cityById.get(id), loadFoodForCity: async () => null,
+      foodArticleCountForCity: () => 0, renderPanel: noop, syncPlaceIndex: noop,
+      getPlaceIndex: () => ({})
+    },
+    helpers: {
+      escapeHtml: String, normalizeKey: (value) => String(value || "").toLowerCase(),
+      normalizeSearchText: (value) => String(value || "").toLowerCase(),
+      hasCoordinates: (value) => Number.isFinite(value?.lon) && Number.isFinite(value?.lat),
+      loadOptionalJson: async () => null, isCountyRecordsPayload: () => false,
+      mergeCountyRecords: noop, upsertRuntimePlaces: noop, fetchImpl: async () => { throw new Error("unexpected fetch"); },
+      windowObject: { setTimeout, clearTimeout }
+    }
+  });
+
+  assert.deepEqual(controller.subareas(city).map(({ id }) => id), ["xihu"]);
+  assert.ok(controller.landmarks(city).some(({ name }) => name === "西湖"));
+  assert.equal(controller.counts(city).subareas, 1);
+});
+
 test("Leaflet ownership lives in the public map-core module", async () => {
   await access(mapCoreUrl);
   const mapCore = await import(mapCoreUrl);
   const appSource = await readFile(appUrl, "utf8");
   const mapCoreSource = await readFile(mapCoreUrl, "utf8");
+  const cityDetailSource = await readFile(cityDetailUrl, "utf8");
 
   assert.equal(typeof mapCore.createMapController, "function");
   assert.doesNotMatch(appSource, /\bL\.(?:map|geoJSON)\s*\(/);
@@ -37,13 +95,13 @@ test("Leaflet ownership lives in the public map-core module", async () => {
     "app.js must use cohesive map operations, not Leaflet forwarding methods"
   );
   assert.doesNotMatch(appSource, /state\.cityDetailLayer\b|\.addTo\s*\(/, "app.js must not attach or clear map layers");
-  assert.match(appSource, /mapController\.renderCityDetail\s*\(/);
-  assert.match(appSource, /const\s+detailSession\s*=\s*mapController\.enterCityView\s*\(\s*city\.id\s*\)/);
+  assert.match(cityDetailSource, /mapController\.renderCityDetail\s*\(/);
+  assert.match(cityDetailSource, /const\s+detailSession\s*=\s*mapController\.enterCityView\s*\(\s*city\.id\s*\)/);
   assert.match(
-    appSource,
+    cityDetailSource,
     /await\s+loadCityDetail\s*\(\s*city\s*,\s*detailSession\s*\)[\s\S]*?isDetailSessionCurrent\s*\(\s*detailSession\s*\)[\s\S]*?exitCityViewBtn\.hidden\s*=\s*false/
   );
-  assert.match(appSource, /renderCityDetail\s*\(\s*\{\s*session:\s*detailSession,/);
+  assert.match(cityDetailSource, /renderCityDetail\s*\(\s*\{\s*session:\s*detailSession,/);
   assert.match(appSource, /createMapController\s*\(\s*\{[\s\S]*?L:\s*window\.L[\s\S]*?state,[\s\S]*?callbacks:[\s\S]*?helpers:/);
   assert.doesNotMatch(
     appSource,

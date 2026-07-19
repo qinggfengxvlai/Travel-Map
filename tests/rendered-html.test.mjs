@@ -6,6 +6,7 @@ const htmlUrl = new URL("../public/static-site/index.html", import.meta.url);
 const appUrl = new URL("../public/static-site/app.js", import.meta.url);
 const mapCoreUrl = new URL("../public/static-site/map-core.js", import.meta.url);
 const foodContentUrl = new URL("../public/static-site/food-content.js", import.meta.url);
+const cityDetailUrl = new URL("../public/static-site/city-detail.js", import.meta.url);
 const stylesUrl = new URL("../public/static-site/styles.css", import.meta.url);
 const packageUrl = new URL("../package.json", import.meta.url);
 const litePrefectureUrls = Array.from(
@@ -237,6 +238,7 @@ test("app renders critical map data before hydrating optional summaries", async 
   const app = await readFile(appUrl, "utf8");
   const mapCore = await readFile(mapCoreUrl, "utf8");
   const foodContent = await readFile(foodContentUrl, "utf8");
+  const cityDetail = await readFile(cityDetailUrl, "utf8");
 
   assert.match(
     app,
@@ -309,16 +311,17 @@ test("app renders critical map data before hydrating optional summaries", async 
   assert.match(mapCore, /if\s*\(\s*bounds\.isValid\s*\(\s*\)\s*\)/);
   assert.match(mapCore, /L\.latLngBounds\s*\(\s*state\.cities\.map/);
   assert.doesNotMatch(app, /throw new Error\s*\(\s*["']china-prefectures data is empty["']\s*\)/);
-  assert.match(app, /loadOptionalJson\s*\(\s*`\.\/data\/counties\/by-city\/\$\{cityId\}\.json`/);
+  assert.match(cityDetail, /loadOptionalJson\s*\(\s*`\.\/data\/counties\/by-city\/\$\{cityId\}\.json`/);
   assert.match(foodContent, /loadOptionalJson\s*\(\s*`\.\/data\/food-articles\/by-city\/\$\{cityId\}\.json`/);
 });
 
 test("app persists runtime district places through the place index overlay", async () => {
   const app = await readFile(appUrl, "utf8");
-  const districtFactory = functionSource(app, "districtPlaceFromFeature");
+  const cityDetail = await readFile(cityDetailUrl, "utf8");
+  const districtFactory = functionSource(cityDetail, "districtPlaceFromFeature");
 
   assert.match(app, /\bupsertRuntimePlaces\b/);
-  assert.match(districtFactory, /upsertRuntimePlaces\s*\(\s*placeIndex\s*,\s*\[\s*place\s*\]\s*\)/);
+  assert.match(districtFactory, /upsertRuntimePlaces\s*\(\s*getPlaceIndex\s*\(\s*\)\s*,\s*\[\s*place\s*\]\s*\)/);
   assert.match(districtFactory, /syncPlaceIndex\s*\(\s*\)/);
   assert.doesNotMatch(districtFactory, /state\.placeById\.set\s*\(/);
 });
@@ -326,10 +329,11 @@ test("app persists runtime district places through the place index overlay", asy
 test("app wires deferred recovery, merge precedence, retryability and readiness policies", async () => {
   const app = await readFile(appUrl, "utf8");
   const foodContent = await readFile(foodContentUrl, "utf8");
+  const cityDetail = await readFile(cityDetailUrl, "utf8");
   const prepareMigration = functionSource(app, "prepareTripMigration");
   const restore = functionSource(app, "restoreTripState");
   const hydrate = functionSource(app, "hydrateDeferredSummaries");
-  const ensureCounties = functionSource(app, "ensureCityCounties");
+  const ensureCounties = functionSource(cityDetail, "ensureCityCounties");
   const ensureFood = functionSource(foodContent, "ensureCity");
   const commit = functionSource(app, "commitTripPlan");
   const init = functionSource(app, "initApp");
