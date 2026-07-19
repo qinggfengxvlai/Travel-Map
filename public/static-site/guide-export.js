@@ -1,4 +1,4 @@
-import { dayDate, timeToMinutes } from "./trip-plan.js";
+import { dayDate, timeToMinutes } from "./trip-plan.js?v=progressive-2";
 
 const WEEKDAYS = ["星期日", "星期一", "星期二", "星期三", "星期四", "星期五", "星期六"];
 

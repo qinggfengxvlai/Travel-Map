@@ -57,6 +57,31 @@ test("creates a versioned trip without requiring a start date", () => {
   assert.deepEqual(routePlaceIds(repeatedPlan), ["a", "b", "a"]);
 });
 
+test("creates unique IDs when randomUUID is unavailable on a public HTTP origin", () => {
+  const cryptoDescriptor = Object.getOwnPropertyDescriptor(globalThis, "crypto");
+  Object.defineProperty(globalThis, "crypto", {
+    configurable: true,
+    value: {
+      getRandomValues(values) {
+        values.fill(0);
+        return values;
+      }
+    }
+  });
+  try {
+    const plan = createTripPlan({ placeIds: ["beijing", "shanghai"] });
+    const ids = [
+      plan.days[0].id,
+      ...plan.days[0].cityEntries.flatMap((entry) => [entry.id, entry.visitId])
+    ];
+    assert.equal(new Set(ids).size, ids.length);
+    assert.ok(ids.every((id) => typeof id === "string" && id.length > 8));
+  } finally {
+    if (cryptoDescriptor) Object.defineProperty(globalThis, "crypto", cryptoDescriptor);
+    else delete globalThis.crypto;
+  }
+});
+
 test("keeps transport mode as normalized TripPlan metadata", () => {
   const train = createTripPlan({
     placeIds: ["beijing"],

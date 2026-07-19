@@ -9,8 +9,9 @@
     "dev": "vinext dev",
     "build": "vinext build",
     "start": "vinext start",
-    "test": "node --test tests/trip-plan.test.mjs tests/trip-editor.test.mjs tests/guide-export.test.mjs tests/rendered-html.test.mjs tests/trip-archive.test.mjs",
+    "test": "node --test tests/app-data.test.mjs tests/place-index.test.mjs tests/food-content.test.mjs tests/module-boundaries.test.mjs tests/trip-plan.test.mjs tests/trip-editor.test.mjs tests/guide-export.test.mjs tests/rendered-html.test.mjs tests/trip-archive.test.mjs",
     "test:build": "npm run test && npm run build",
+    "test:browser": "playwright test",
     "lint": "eslint . --ignore-pattern dist --ignore-pattern .next",
     "db:generate": "drizzle-kit generate"
   },
@@ -23,6 +24,7 @@
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
+    "@playwright/test": "^1.61.1",
     "@tailwindcss/postcss": "4.2.1",
     "@types/node": "22.19.19",
     "@types/react": "19.2.14",

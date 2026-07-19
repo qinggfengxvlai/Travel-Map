@@ -2,7 +2,7 @@ import {
   LEGACY_TRIP_STORAGE_KEY,
   TRIP_STORAGE_KEY,
   compactTripPlan
-} from "./trip-plan.js";
+} from "./trip-plan.js?v=progressive-2";
 
 export const LEGACY_TRIP_BACKUP_KEY = "route-studio-trip-v1-backup";
 
@@ -99,6 +99,62 @@ export function isLegacyTripPayload(value) {
   return Array.isArray(value.routes) || (
     typeof value.selectedCityId === "string" && value.selectedCityId.trim().length > 0
   );
+}
+
+function tripReference(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+export function prepareLegacyRecoveryData(value) {
+  if (!isLegacyTripPayload(value)) throw new TypeError("Invalid legacy trip payload");
+  const routes = (Array.isArray(value.routes) ? value.routes : []).flatMap((route) => {
+    if (!isRecord(route)) return [];
+    const from = tripReference(route.from);
+    const to = tripReference(route.to);
+    return from && to ? [{ ...route, from, to }] : [];
+  });
+  return {
+    ...value,
+    routes,
+    selectedCityId: tripReference(value.selectedCityId)
+  };
+}
+
+export class MissingTripPlacesError extends Error {
+  constructor(missingPlaceIds) {
+    const uniqueIds = [...new Set(Array.isArray(missingPlaceIds) ? missingPlaceIds : [])];
+    super(`Trip recovery is waiting for ${uniqueIds.length} place record(s)`);
+    this.name = "MissingTripPlacesError";
+    this.code = "TRIP_RECOVERY_MISSING_PLACES";
+    this.missingPlaceIds = uniqueIds;
+  }
+}
+
+export function selectTripRecoveryCandidate(candidates, evaluateCandidate) {
+  if (!Array.isArray(candidates) || typeof evaluateCandidate !== "function") {
+    throw new TypeError("Recovery candidates and evaluator are required");
+  }
+  const failures = [];
+  for (const candidate of candidates) {
+    if (candidate.error) {
+      failures.push({ candidate, error: candidate.error });
+      continue;
+    }
+    try {
+      return {
+        status: "ready",
+        candidate,
+        value: evaluateCandidate(candidate),
+        failures
+      };
+    } catch (error) {
+      if (error instanceof MissingTripPlacesError) {
+        return { status: "deferred", candidate, error, failures };
+      }
+      failures.push({ candidate, error });
+    }
+  }
+  return { status: "unavailable", failures };
 }
 
 export function readTripRecoveryCandidates({ storage, currentUrl }) {
