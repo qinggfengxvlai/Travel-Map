@@ -1,0 +1,12 @@
+.superpowers/
+.worktrees/
+__pycache__/
+*.pyc
+.openai/*.tgz
+node_modules/
+test-results/
+playwright-report/
+.next/
+.wrangler/
+.env
+.env.*

@@ -1,3 +1,53 @@
+import {
+  LEGACY_TRIP_STORAGE_KEY,
+  TRIP_PLAN_VERSION,
+  TRIP_STORAGE_KEY,
+  applyTripCommand,
+  autoScheduleTrip,
+  createTripPlan,
+  dayDate,
+  migrateTripState,
+  normalizeTripPlan,
+  reconcileRoutePlaces,
+  resolveTripPace,
+  resolveTripTransportMode,
+  routePlaceIds,
+  shouldUseTripFile,
+  validateTripPlan
+} from "./trip-plan.js";
+import {
+  LEGACY_TRIP_BACKUP_KEY,
+  backupLegacyTripRaw,
+  canExportTripFile,
+  captureTripArchiveSnapshot,
+  clearTripArchive,
+  createLazyStorageAdapter,
+  finalizeLegacyMigration,
+  isLegacyTripPayload,
+  legacyMigrationPending,
+  readTripRecoveryCandidates,
+  restoreTripArchiveSnapshot,
+  safeTripNameForFile,
+  shareUrlForTrip,
+  tripFileExportPayload,
+  tripFileName,
+  tripFileText,
+  writeTripPlanV2
+} from "./trip-archive.js";
+import {
+  buildGuideModel,
+  buildMarkdownGuide,
+  buildPrintableHtml
+} from "./guide-export.js";
+import {
+  commandForTripItemForm,
+  mountTripEditor,
+  renderTripEditorMarkup,
+  restoreTripEditorFocus
+} from "./trip-editor.js";
+
+const tripArchiveStorage = createLazyStorageAdapter(() => window.localStorage);
+
 const labels = {
   chooseStart: "\u9009\u62e9\u51fa\u53d1\u57ce\u5e02",
   chooseHint: "\u70b9\u51fb\u4e2d\u56fd\u5730\u56fe\u4e0a\u7684\u5706\u5f62\u57ce\u5e02\u5750\u6807\u4f5c\u4e3a\u8d77\u70b9\u3002",
@@ -35,7 +85,41 @@ const transportProfiles = {
   }
 };
 
+const tripPaceProfiles = {
+  relaxed: {
+    label: "\u8f7b\u677e",
+    dailyTravelLimitSeconds: 3 * 60 * 60,
+    hardTravelLimitSeconds: 6 * 60 * 60,
+    maxDailyPlaces: 2,
+    playWindowSeconds: 11 * 60 * 60,
+    description: "\u5c11\u6362\u57ce\uff0c\u591a\u7559\u767d\uff0c\u9002\u5408\u4eb2\u5b50\u6216\u6162\u6e38\u3002"
+  },
+  standard: {
+    label: "\u6807\u51c6",
+    dailyTravelLimitSeconds: 4 * 60 * 60,
+    hardTravelLimitSeconds: 8 * 60 * 60,
+    maxDailyPlaces: 3,
+    playWindowSeconds: 10 * 60 * 60,
+    description: "\u4e00\u5929\u53ef\u8de8\u4e00\u6bb5\u4e2d\u7b49\u8ddd\u79bb\uff0c\u6e38\u73a9\u548c\u4ea4\u901a\u6bd4\u8f83\u5747\u8861\u3002"
+  },
+  compact: {
+    label: "\u7d27\u51d1",
+    dailyTravelLimitSeconds: 6 * 60 * 60,
+    hardTravelLimitSeconds: 9 * 60 * 60,
+    maxDailyPlaces: 4,
+    playWindowSeconds: 12 * 60 * 60,
+    description: "\u9002\u5408\u8d76\u8def\u6216\u57ce\u5e02\u6253\u5361\uff0c\u5efa\u8bae\u51cf\u5c11\u666f\u70b9\u6df1\u5ea6\u3002"
+  }
+};
+
 const CITY_CLICK_DELAY_MS = 180;
+const DAILY_TRAVEL_LIMIT_SECONDS = 4 * 60 * 60;
+const MAX_DAILY_PLACES = 3;
+const CITY_PLAY_WINDOW_SECONDS = 10 * 60 * 60;
+const DEFAULT_TRIP_NAME = "\u6211\u7684\u65c5\u884c";
+let legacyTripBackupPending = false;
+let lastTripPersistenceResult = { stored: false, hashCleared: true };
+let emergencyLegacyTripRaw = null;
 
 const landmarkCatalog = {
   beijing: [
@@ -386,6 +470,10 @@ const provinceCodeNames = {
 const state = {
   selectedCityId: null,
   transportMode: "highspeed",
+  tripPace: "standard",
+  tripPlan: null,
+  tripHistory: [],
+  tripEditorDestroy: null,
   viewMode: "china",
   activeCityViewId: null,
   activeDistrictBoundaryCount: 0,
@@ -393,6 +481,7 @@ const state = {
   activeStationCount: 0,
   activeSubwayLineCount: 0,
   activeSubwayStationCount: 0,
+  activeFoodArticleCount: 0,
   pendingCityClickTimer: null,
   routes: [],
   nextRouteId: 1,
@@ -418,6 +507,14 @@ const state = {
   metroNetworkPromise: null,
   passengerStationNames: null,
   passengerStationNamesPromise: null,
+  foodArticles: [],
+  foodArticleById: new Map(),
+  foodArticlesByCity: new Map(),
+  foodArticlesByPlace: new Map(),
+  loadedCountyCityIds: new Set(),
+  countyLoadPromises: new Map(),
+  loadedFoodArticleCityIds: new Set(),
+  foodArticleLoadPromises: new Map(),
   searchResults: [],
   featureCityIds: new WeakMap(),
   cities: [],
@@ -433,7 +530,13 @@ const emptyState = document.querySelector("#emptyState");
 const undoBtn = document.querySelector("#undoBtn");
 const clearBtn = document.querySelector("#clearBtn");
 const resetViewBtn = document.querySelector("#resetViewBtn");
-const exportBtn = document.querySelector("#exportBtn");
+const saveTripBtn = document.querySelector("#saveTripBtn");
+const shareTripBtn = document.querySelector("#shareTripBtn");
+const tripImportBtn = document.querySelector("#tripImportBtn");
+const tripImportInput = document.querySelector("#tripImportInput");
+const exportTripFileBtn = document.querySelector("#exportTripFileBtn");
+const exportMarkdownBtn = document.querySelector("#exportMarkdownBtn");
+const exportHtmlBtn = document.querySelector("#exportHtmlBtn");
 const citySearch = document.querySelector("#citySearch");
 const clearSearchBtn = document.querySelector("#clearSearchBtn");
 const searchResults = document.querySelector("#searchResults");
@@ -443,7 +546,34 @@ const totalDistance = document.querySelector("#totalDistance");
 const totalDuration = document.querySelector("#totalDuration");
 const chainLabel = document.querySelector("#chainLabel");
 const availableCityCount = document.querySelector("#availableCityCount");
+const foodArticleCount = document.querySelector("#foodArticleCount");
+const foodArticleList = document.querySelector("#foodArticleList");
+const foodEmptyState = document.querySelector("#foodEmptyState");
+const itineraryMeta = document.querySelector("#itineraryMeta");
+const itineraryList = document.querySelector("#itineraryList");
+const tripNameInput = document.querySelector("#tripNameInput");
+const tripStartDateInput = document.querySelector("#tripStartDateInput");
+const autoScheduleBtn = document.querySelector("#autoScheduleBtn");
+const undoTripEditBtn = document.querySelector("#undoTripEditBtn");
+const tripEditorRoot = document.querySelector("#tripEditorRoot");
+const itineraryEmptyState = document.querySelector("#itineraryEmptyState");
+const tripHealth = document.querySelector("#tripHealth");
+const tripItemDialog = document.querySelector("#tripItemDialog");
+const tripItemForm = document.querySelector("#tripItemForm");
+const tripItemDialogTitle = document.querySelector("#tripItemDialogTitle");
+const tripItemTypeLabel = document.querySelector("#tripItemTypeLabel");
+const tripItemTitleLabel = document.querySelector("#tripItemTitleLabel");
+const tripItemStartTimeLabel = document.querySelector("#tripItemStartTimeLabel");
+const tripItemEndTimeLabel = document.querySelector("#tripItemEndTimeLabel");
+const tripItemPlaceId = document.querySelector("#tripItemPlaceId");
+const tripItemTitle = document.querySelector("#tripItemTitle");
+const tripLandmarkOptions = document.querySelector("#tripLandmarkOptions");
+const tripItemCancelBtn = document.querySelector("#tripItemCancelBtn");
+const tripArchiveStatus = document.querySelector("#tripArchiveStatus");
+const appShell = document.querySelector(".app-shell");
+const mobileViewButtons = Array.from(document.querySelectorAll("[data-mobile-view]"));
 const transportButtons = Array.from(document.querySelectorAll("[data-mode]"));
+const paceButtons = Array.from(document.querySelectorAll("[data-pace]"));
 const exitCityViewBtn = document.querySelector("#exitCityViewBtn");
 const mapBadgeLabel = document.querySelector(".map-badge span");
 
@@ -453,11 +583,21 @@ async function loadJson(path) {
   return response.json();
 }
 
+async function loadOptionalJson(path, options = {}) {
+  try {
+    return await loadJson(path);
+  } catch (error) {
+    if (!options.quiet) console.warn("optional data unavailable", path, error);
+    return null;
+  }
+}
+
 async function loadMapData() {
-  const [mapData, cityData, countyData] = await Promise.all([
+  const [mapData, cityData, countyData, foodData] = await Promise.all([
     loadJson("./data/china-prefectures.json"),
     loadJson("./data/china-cities.json"),
-    loadJson("./data/china-counties.json")
+    loadOptionalJson("./data/counties-summary.json"),
+    loadOptionalJson("./data/wechat-food-summary.json")
   ]);
 
   const cities = cityData && cityData.cities ? cityData.cities : [];
@@ -481,17 +621,74 @@ async function loadMapData() {
   state.counties = [
     ...(countyData && countyData.counties ? countyData.counties : []),
     ...buildMunicipalityCountyEntries(state.hiddenMunicipalityChildren, state.cities)
-  ].map((county) => ({
-      ...county,
-      placeType: "county",
-      searchText: normalizeSearchText(`${county.name} ${county.province} ${county.pinyin} ${county.parentCityName} ${county.parentCityPinyin}`),
-      searchType: "county"
-    }));
+  ].map(normalizeCountyRecord);
   state.cityById = new Map(state.cities.map((city) => [city.id, city]));
   state.placeById = buildPlaceMap(state.cities, state.counties);
   state.cityByKey = buildCityKeyMap(state.cities, state.hiddenMunicipalityChildren);
   state.cityByProvinceKey = buildCityProvinceKeyMap(state.cities, state.hiddenMunicipalityChildren);
   state.cityKeyEntries = Array.from(state.cityByKey.entries()).sort((a, b) => b[0].length - a[0].length);
+  hydrateFoodArticles(foodData);
+}
+
+function hydrateFoodArticles(foodData) {
+  const knownPlaces = state.placeById;
+  state.foodArticles = (foodData && Array.isArray(foodData.articles) ? foodData.articles : [])
+    .filter((article) => knownPlaces.has(article.placeId) || knownPlaces.has(article.cityId))
+    .map(normalizeFoodArticleRecord)
+    .sort((a, b) => Number(a.day || 0) - Number(b.day || 0));
+
+  state.foodArticleById = new Map(state.foodArticles.map((article) => [article.id, article]));
+  state.foodArticlesByCity = groupArticlesBy("cityId");
+  state.foodArticlesByPlace = groupArticlesBy("placeId");
+  enrichPlaceSearchTextWithArticles();
+}
+
+function normalizeFoodArticleRecord(article) {
+  return {
+    ...article,
+    searchText: article.searchText || normalizeSearchText(`${article.title} ${article.description} ${article.cityName} ${article.countyName} ${(article.foods || []).join(" ")}`)
+  };
+}
+
+function mergeFoodArticleRecords(articles) {
+  if (!Array.isArray(articles) || !articles.length) return [];
+  const byId = new Map(state.foodArticles.map((article) => [article.id, article]));
+  const merged = articles.map((article) => {
+    const record = normalizeFoodArticleRecord({ ...(byId.get(article.id) || {}), ...article });
+    byId.set(record.id, record);
+    state.foodArticleById.set(record.id, record);
+    return record;
+  });
+  state.foodArticles = Array.from(byId.values()).sort((a, b) => Number(a.day || 0) - Number(b.day || 0));
+  state.foodArticlesByCity = groupArticlesBy("cityId");
+  state.foodArticlesByPlace = groupArticlesBy("placeId");
+  return merged;
+}
+
+function groupArticlesBy(field) {
+  const map = new Map();
+  state.foodArticles.forEach((article) => {
+    const key = article[field];
+    if (!key) return;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(article);
+  });
+  return map;
+}
+
+function enrichPlaceSearchTextWithArticles() {
+  const appendArticleText = (place) => {
+    const cityArticles = articlesForCity(place.id);
+    const placeArticles = articlesForPlace(place.id);
+    const articles = place.placeType === "county" ? placeArticles : cityArticles;
+    if (!articles.length) return;
+    const articleText = articles
+      .flatMap((article) => [article.title, article.description, ...(article.foods || [])])
+      .join(" ");
+    place.searchText = `${place.searchText} ${normalizeSearchText(articleText)}`;
+  };
+  state.cities.forEach(appendArticleText);
+  state.counties.forEach(appendArticleText);
 }
 
 function buildMunicipalityCountyEntries(children, displayCities) {
@@ -521,6 +718,28 @@ function buildPlaceMap(cities, counties) {
   return map;
 }
 
+function normalizeCountyRecord(county) {
+  return {
+    ...county,
+    placeType: "county",
+    searchType: "county",
+    searchText: county.searchText || normalizeSearchText(`${county.name} ${county.province} ${county.pinyin} ${county.parentCityName} ${county.parentCityPinyin}`)
+  };
+}
+
+function mergeCountyRecords(counties) {
+  if (!Array.isArray(counties) || !counties.length) return [];
+  const byId = new Map(state.counties.map((county) => [county.id, county]));
+  const merged = counties.map((county) => {
+    const record = normalizeCountyRecord({ ...(byId.get(county.id) || {}), ...county });
+    byId.set(record.id, record);
+    state.placeById.set(record.id, record);
+    return record;
+  });
+  state.counties = Array.from(byId.values());
+  return merged;
+}
+
 function initMap() {
   if (!window.L) throw new Error("Leaflet renderer did not load");
 
@@ -541,6 +760,8 @@ function initMap() {
   state.map.createPane("cityLabels");
   state.map.getPane("cityLabels").style.zIndex = 650;
   state.map.getPane("cityLabels").style.pointerEvents = "none";
+  state.map.createPane("foodMarkers");
+  state.map.getPane("foodMarkers").style.zIndex = 720;
   state.routeLayer = L.layerGroup().addTo(state.map);
   state.cityLayer = L.layerGroup().addTo(state.map);
   state.labelLayer = L.layerGroup([], { pane: "cityLabels" }).addTo(state.map);
@@ -729,11 +950,12 @@ function cityStyle(cityId) {
   const visited = new Set(state.routes.flatMap((route) => [route.from, route.to]));
   const isSelected = cityId === state.selectedCityId;
   const isVisited = visited.has(cityId);
+  const hasFoodArticles = articleCountForCity(cityId) > 0;
   return {
-    radius: isSelected ? 7 : isVisited ? 5 : 3.4,
+    radius: isSelected ? 7 : isVisited ? 5 : hasFoodArticles ? 4.3 : 3.4,
     color: isSelected ? "#e84d3d" : isVisited ? "#168f7d" : "#fffaf0",
     weight: isSelected ? 2.5 : 1.25,
-    fillColor: isSelected ? "#ffe7bd" : isVisited ? "#168f7d" : "#e84d3d",
+    fillColor: isSelected ? "#ffe7bd" : isVisited ? "#168f7d" : hasFoodArticles ? "#c46b2a" : "#e84d3d",
     fillOpacity: isSelected ? 1 : 0.92,
     opacity: 1
   };
@@ -774,7 +996,7 @@ function updateSearchResults() {
 
   state.searchResults.forEach((item) => {
     const button = document.createElement("button");
-    button.className = "search-result";
+    button.className = `search-result ${item.searchType === "county" ? "county" : "city"}`;
     button.type = "button";
     button.setAttribute("role", "option");
     button.innerHTML = searchResultHtml(item);
@@ -784,11 +1006,24 @@ function updateSearchResults() {
 }
 
 function searchResultHtml(item) {
+  const articleCount = articleCountForPlace(item.id) || articleCountForCity(item.searchType === "county" ? item.parentCityId : item.id);
+  const articleBadge = articleCount ? `<em>${articleCount} \u7bc7\u98df\u884c\u8bb0</em>` : "";
+  const typeLabel = item.searchType === "county" ? "\u533a\u53bf" : "\u57ce\u5e02";
   if (item.searchType === "county") {
-    return `<strong>${escapeHtml(item.name)}</strong><span>${escapeHtml(item.parentCityName)} · ${escapeHtml(item.province)} / ${escapeHtml(item.pinyin)}</span>`;
+    return `
+      <span class="search-copy">
+        <strong class="search-title"><span class="type-pill">${typeLabel}</span>${escapeHtml(item.name)}${articleBadge}</strong>
+        <span>${escapeHtml(item.parentCityName)} \u00b7 ${escapeHtml(item.province)} / ${escapeHtml(item.pinyin)}</span>
+      </span>
+    `;
   }
 
-  return `<strong>${escapeHtml(item.name)}</strong><span>\u5e02\u7ea7\u884c\u653f\u533a · ${escapeHtml(item.province)} / ${escapeHtml(item.pinyin)}</span>`;
+  return `
+    <span class="search-copy">
+      <strong class="search-title"><span class="type-pill">${typeLabel}</span>${escapeHtml(item.name)}${articleBadge}</strong>
+      <span>\u5e02\u7ea7\u884c\u653f\u533a \u00b7 ${escapeHtml(item.province)} / ${escapeHtml(item.pinyin)}</span>
+    </span>
+  `;
 }
 
 function scoreSearchResult(item, query) {
@@ -813,11 +1048,15 @@ async function selectSearchResult(item) {
   if (!targetCity) return;
 
   if (item.searchType === "county") {
+    await ensureCityCounties(targetCity.id);
+    const county = placeById(item.id) || item;
     if (state.viewMode !== "city" || state.activeCityViewId !== targetCity.id) {
       await enterCityView(targetCity.id);
     }
-    state.map.flyTo([item.lat, item.lon], Math.max(state.map.getZoom(), 10), { duration: 0.45 });
-    handlePlaceClick(item.id);
+    if (hasCoordinates(county)) {
+      state.map.flyTo([county.lat, county.lon], Math.max(state.map.getZoom(), 10), { duration: 0.45 });
+    }
+    handlePlaceClick(county.id);
   } else {
     if (state.viewMode === "city") exitCityView({ fit: false });
     state.map.flyTo([item.lat, item.lon], Math.max(state.map.getZoom(), 10), { duration: 0.45 });
@@ -1014,19 +1253,413 @@ function curvedRoutePoints(from, to) {
   });
 }
 
+function isValidRouteId(routeId) {
+  return (Number.isSafeInteger(routeId) && routeId > 0) ||
+    (typeof routeId === "string" && routeId.trim().length > 0);
+}
+
+function syncRoutesFromTripPlan() {
+  const placeIds = state.tripPlan ? routePlaceIds(state.tripPlan) : [];
+  const previousRoutes = state.routes;
+  const claimedRoutes = new Set();
+  const claimedRouteIds = new Set();
+  const reservedRouteIds = new Set(
+    previousRoutes.map((route) => route?.id).filter(isValidRouteId)
+  );
+  const largestNumericId = previousRoutes.reduce(
+    (largest, route) => Number.isSafeInteger(route?.id) ? Math.max(largest, route.id) : largest,
+    0
+  );
+  state.nextRouteId = Math.max(
+    Number.isSafeInteger(state.nextRouteId) && state.nextRouteId > 0 ? state.nextRouteId : 1,
+    largestNumericId + 1
+  );
+
+  const allocateRouteId = () => {
+    while (reservedRouteIds.has(state.nextRouteId)) state.nextRouteId += 1;
+    const routeId = state.nextRouteId;
+    state.nextRouteId += 1;
+    reservedRouteIds.add(routeId);
+    return routeId;
+  };
+  const routesToEstimate = [];
+  const nextRoutes = placeIds.slice(1).map((to, index) => {
+    const from = placeIds[index];
+    const reusable = previousRoutes.find((route) =>
+      !claimedRoutes.has(route) &&
+      isValidRouteId(route?.id) &&
+      !claimedRouteIds.has(route.id) &&
+      route.from === from &&
+      route.to === to &&
+      route.transportMode === state.transportMode
+    );
+    if (reusable) {
+      claimedRoutes.add(reusable);
+      claimedRouteIds.add(reusable.id);
+      return reusable;
+    }
+
+    const route = {
+      id: allocateRouteId(),
+      from,
+      to,
+      status: "loading",
+      distance: null,
+      duration: null,
+      fallback: false,
+      error: null,
+      transportMode: state.transportMode,
+      transportLabel: transportProfile().label
+    };
+    claimedRouteIds.add(route.id);
+    routesToEstimate.push(route);
+    return route;
+  });
+
+  state.routes = nextRoutes;
+  state.selectedCityId = placeIds.at(-1) ?? null;
+  routesToEstimate.forEach((route) => calculateRouteMetrics(route));
+}
+
+function commitTripPlan(nextPlan, {
+  recordHistory = true,
+  message = "\u5df2\u81ea\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002",
+  focusToken = null,
+  completeLegacyMigration = true
+} = {}) {
+  if (recordHistory && state.tripPlan && state.tripPlan !== nextPlan) {
+    state.tripHistory.push(structuredClone(state.tripPlan));
+  }
+  state.tripHistory = state.tripHistory.slice(-20);
+  state.tripPlan = nextPlan;
+  state.tripPace = resolveTripPace(nextPlan, state.tripPace);
+  state.transportMode = resolveTripTransportMode(nextPlan);
+  syncRoutesFromTripPlan();
+  renderRoutes();
+  renderPanel();
+  if (focusToken) {
+    restoreTripEditorFocus(tripEditorRoot, focusToken);
+    window.requestAnimationFrame(() => restoreTripEditorFocus(tripEditorRoot, focusToken));
+  }
+  const persisted = persistTripState(message);
+  if (persisted && completeLegacyMigration) finalizeLegacyTripBackup(message);
+  return persisted;
+}
+
+function tripIdentifier(value) {
+  return typeof value === "string" && value.trim() ? value.trim() : null;
+}
+
+function affectedTripDayLabels(plan, dayIds) {
+  const uniqueDayIds = [...new Set(Array.isArray(dayIds) ? dayIds : [])];
+  return uniqueDayIds.flatMap((dayId) => {
+    const dayIndex = plan.days.findIndex((day) => day.id === dayId);
+    if (dayIndex < 0) return [];
+    let date = null;
+    try {
+      date = dayDate(plan, dayIndex);
+    } catch {
+      date = null;
+    }
+    return [`\u7b2c ${dayIndex + 1} \u5929${date ? `\uff08${date}\uff09` : ""}`];
+  });
+}
+
+function handleTripCommand(command, focusToken) {
+  if (!state.tripPlan || !command || typeof command !== "object" || Array.isArray(command)) return false;
+  let result = applyTripCommand(state.tripPlan, command);
+  if (result.requiresConfirmation) {
+    const labels = affectedTripDayLabels(state.tripPlan, result.affectedDayIds);
+    const target = labels.length ? labels.join("\u3001") : "\u76f8\u5173\u65e5\u671f";
+    const confirmationMessage = result.confirmationReason === "cleanup-associated-content"
+      ? `\u79fb\u52a8\u57ce\u5e02\u4f1a\u6e05\u7406${target}\u4e2d\u4e0e\u8be5\u57ce\u5e02\u5173\u8054\u7684\u4ea4\u901a\u3001\u6d3b\u52a8\u6216\u4f4f\u5bbf\u5185\u5bb9\uff0c\u662f\u5426\u7ee7\u7eed\uff1f`
+      : `\u6b64\u64cd\u4f5c\u4f1a\u5f71\u54cd${target}\u7684\u4ea4\u901a\u3001\u6d3b\u52a8\u6216\u4f4f\u5bbf\u5185\u5bb9\uff0c\u662f\u5426\u7ee7\u7eed\uff1f`;
+    const confirmed = window.confirm(confirmationMessage);
+    if (!confirmed) return false;
+    result = applyTripCommand(state.tripPlan, command, { force: true });
+  }
+  if (!result.changed) {
+    if (result.blockedReason === "item-place-mismatch") {
+      updateArchiveStatus("\u9879\u76ee\u4e0e\u76ee\u6807\u65e5\u671f\u7684\u57ce\u5e02\u4e0d\u5339\u914d\uff0c\u672a\u6267\u884c\u79fb\u52a8\u3002", "error");
+    }
+    return false;
+  }
+  commitTripPlan(result.plan, { focusToken });
+  return true;
+}
+
+function tripFormControl(name) {
+  return tripItemForm?.elements?.namedItem(name) ?? null;
+}
+
+function setTripFormValue(name, value) {
+  const control = tripFormControl(name);
+  if (!control) return;
+  if (control.type === "checkbox") {
+    control.checked = value === 1 || value === "1" || value === true;
+    return;
+  }
+  control.value = value === null || value === undefined ? "" : String(value);
+}
+
+function tripDayPlaceIds(day) {
+  const placeIds = [];
+  (Array.isArray(day?.cityEntries) ? day.cityEntries : []).forEach((entry) => {
+    const placeId = tripIdentifier(entry?.placeId);
+    if (placeId && !placeIds.includes(placeId)) placeIds.push(placeId);
+  });
+  return placeIds;
+}
+
+function populateTripPlaceSelect(control, placeIds, preferredPlaceId) {
+  if (!control) return "";
+  const options = placeIds.map((placeId) => {
+    const option = document.createElement("option");
+    option.value = placeId;
+    option.textContent = placeById(placeId)?.name || placeId;
+    return option;
+  });
+  control.replaceChildren(...options);
+  const preferred = tripIdentifier(preferredPlaceId);
+  const selected = preferred && placeIds.includes(preferred) ? preferred : (placeIds[0] || "");
+  control.value = selected;
+  return selected;
+}
+
+function landmarkNamesForPlace(placeId) {
+  const place = placeById(placeId);
+  const city = cityForPlace(place);
+  if (!city) return [];
+  const cacheKey = state.cityAdcodes.get(city.id) || city.id;
+  const cached = state.landmarkCache.get(cacheKey) || [];
+  return uniqueByName(
+    [...cityLandmarks(city), ...cached]
+      .map((landmark) => typeof landmark?.name === "string" ? landmark.name.trim() : "")
+      .filter(Boolean)
+  );
+}
+
+function renderTripLandmarkOptions(placeId) {
+  const names = landmarkNamesForPlace(placeId);
+  if (tripLandmarkOptions) {
+    tripLandmarkOptions.replaceChildren(...names.map((name) => {
+      const option = document.createElement("option");
+      option.value = name;
+      return option;
+    }));
+  }
+  return names;
+}
+
+function configureTripItemForm(type) {
+  const labels = {
+    transport: { type: "\u4ea4\u901a", title: "\u8f66\u6b21\u6216\u73ed\u6b21", start: "\u51fa\u53d1\u65f6\u95f4", end: "\u5230\u8fbe\u65f6\u95f4" },
+    activity: { type: "\u6d3b\u52a8", title: "\u6d3b\u52a8\u6807\u9898", start: "\u5f00\u59cb\u65f6\u95f4", end: "\u7ed3\u675f\u65f6\u95f4" },
+    lodging: { type: "\u4f4f\u5bbf", title: "\u4f4f\u5bbf\u540d\u79f0", start: "\u5165\u4f4f\u65f6\u95f4", end: "\u9000\u623f\u65f6\u95f4" }
+  }[type];
+  if (!labels || !tripItemForm) return false;
+  setTripFormValue("type", type);
+  if (tripItemTypeLabel) tripItemTypeLabel.textContent = labels.type;
+  if (tripItemTitleLabel) tripItemTitleLabel.textContent = labels.title;
+  if (tripItemStartTimeLabel) tripItemStartTimeLabel.textContent = labels.start;
+  if (tripItemEndTimeLabel) tripItemEndTimeLabel.textContent = labels.end;
+  tripItemForm.querySelectorAll("[data-trip-types]").forEach((field) => {
+    const supported = (field.dataset.tripTypes || "").split(/\s+/).includes(type);
+    field.hidden = !supported;
+    field.querySelectorAll("input, select, textarea").forEach((control) => {
+      control.disabled = !supported;
+    });
+  });
+  if (tripItemTitle) {
+    if (type === "activity") tripItemTitle.setAttribute("list", "tripLandmarkOptions");
+    else tripItemTitle.removeAttribute("list");
+  }
+  if (type !== "activity" && tripLandmarkOptions) tripLandmarkOptions.replaceChildren();
+  return true;
+}
+
+function closeTripItemDialog(returnValue = "cancel") {
+  if (!tripItemDialog) return;
+  if (tripItemDialog.open && typeof tripItemDialog.close === "function") {
+    tripItemDialog.close(returnValue);
+  } else {
+    tripItemDialog.removeAttribute("open");
+  }
+}
+
+function openTripItemDialog(request = {}) {
+  if (!tripItemDialog || !tripItemForm || !state.tripPlan) return;
+  const dayId = tripIdentifier(request.dayId);
+  const day = state.tripPlan.days.find((candidate) => candidate.id === dayId);
+  if (!day) return;
+  const placeIds = tripDayPlaceIds(day);
+  if (!placeIds.length) {
+    updateArchiveStatus("\u5f53\u5929\u6ca1\u6709\u53ef\u9009\u5730\u70b9\uff0c\u8bf7\u5148\u5b89\u6392\u57ce\u5e02\u3002", "error");
+    return;
+  }
+
+  let type;
+  let item = null;
+  if (request.action === "add-transport") type = "transport";
+  else if (request.action === "add-activity") type = "activity";
+  else if (request.action === "edit-lodging") type = "lodging";
+  else if (request.action === "edit-item") {
+    const itemId = tripIdentifier(request.itemId);
+    item = day.items.find((candidate) => candidate.id === itemId) || null;
+    if (!item || (item.type !== "transport" && item.type !== "activity")) return;
+    type = item.type;
+  } else {
+    return;
+  }
+
+  tripItemForm.reset();
+  if (!configureTripItemForm(type)) return;
+  setTripFormValue("dayId", day.id);
+  setTripFormValue("itemId", item?.id || "");
+  const isEditing = Boolean(item) || (type === "lodging" && day.lodging);
+  if (tripItemDialogTitle) {
+    tripItemDialogTitle.textContent = `${isEditing ? "\u7f16\u8f91" : "\u6dfb\u52a0"}${type === "transport" ? "\u4ea4\u901a" : type === "activity" ? "\u6d3b\u52a8" : "\u4f4f\u5bbf"}`;
+  }
+
+  if (type === "transport") {
+    populateTripPlaceSelect(tripFormControl("fromPlaceId"), placeIds, item?.fromPlaceId || placeIds[0]);
+    populateTripPlaceSelect(tripFormControl("toPlaceId"), placeIds, item?.toPlaceId || placeIds.at(-1));
+    setTripFormValue("serviceNo", item?.serviceNo);
+    setTripFormValue("startTime", item?.startTime);
+    setTripFormValue("endTime", item?.endTime);
+    setTripFormValue("endDayOffset", item?.endDayOffset);
+    setTripFormValue("note", item?.note);
+  } else if (type === "activity") {
+    const selectedPlaceId = populateTripPlaceSelect(
+      tripFormControl("placeId"),
+      placeIds,
+      item?.placeId || day.overnightPlaceId || placeIds[0]
+    );
+    renderTripLandmarkOptions(selectedPlaceId);
+    setTripFormValue("title", item?.title);
+    setTripFormValue("startTime", item?.startTime);
+    setTripFormValue("endTime", item?.endTime);
+    setTripFormValue("address", item?.address);
+    setTripFormValue("note", item?.note);
+  } else {
+    const lodging = day.lodging || {};
+    populateTripPlaceSelect(
+      tripFormControl("placeId"),
+      placeIds,
+      lodging.placeId || day.overnightPlaceId || placeIds[0]
+    );
+    setTripFormValue("title", lodging.name);
+    setTripFormValue("startTime", lodging.checkInTime);
+    setTripFormValue("endTime", lodging.checkOutTime);
+    setTripFormValue("address", lodging.address);
+    setTripFormValue("note", lodging.note);
+  }
+
+  if (!tripItemDialog.open) {
+    if (typeof tripItemDialog.showModal === "function") tripItemDialog.showModal();
+    else tripItemDialog.setAttribute("open", "");
+  }
+  const focusControl = type === "transport" ? tripFormControl("serviceNo") : tripFormControl("title");
+  window.requestAnimationFrame(() => focusControl?.focus());
+}
+
+function submitTripItemForm(event) {
+  event.preventDefault();
+  if (!tripItemForm || !state.tripPlan) return;
+  const values = Object.fromEntries(new FormData(tripItemForm).entries());
+  try {
+    const command = commandForTripItemForm(values, {
+      landmarkNames: values.type === "activity" ? landmarkNamesForPlace(values.placeId) : []
+    });
+    closeTripItemDialog("saved");
+    handleTripCommand(command, { action: "day", dayId: command.dayId });
+  } catch {
+    updateArchiveStatus("\u8bf7\u8865\u5168\u5f53\u524d\u7f16\u8f91\u9879\u76ee\u7684\u5fc5\u586b\u4fe1\u606f\u3002", "error");
+  }
+}
+
+function updateTripNameMetadata() {
+  if (!tripNameInput || !state.tripPlan) return;
+  const currentName = typeof state.tripPlan.name === "string" && state.tripPlan.name.trim()
+    ? state.tripPlan.name.trim().slice(0, 60)
+    : DEFAULT_TRIP_NAME;
+  const requestedName = tripNameInput.value.trim().slice(0, 60);
+  const name = requestedName || currentName;
+  tripNameInput.value = name;
+  handleTripCommand({ type: "update-metadata", patch: { name } });
+}
+
+function updateTripStartDateMetadata() {
+  if (!tripStartDateInput || !state.tripPlan) return;
+  handleTripCommand({
+    type: "update-metadata",
+    patch: { startDate: tripStartDateInput.value || null }
+  });
+}
+
+function undoTripEdit() {
+  const previous = state.tripHistory.pop();
+  if (!previous) return;
+  commitTripPlan(previous, {
+    recordHistory: false,
+    message: "\u5df2\u64a4\u9500\u4e0a\u4e00\u6b21\u884c\u7a0b\u7f16\u8f91\u3002"
+  });
+}
+
+function routeDurationsForAutoSchedule(placeIds) {
+  const durations = {};
+  placeIds.slice(1).forEach((to, index) => {
+    const from = placeIds[index];
+    const indexedRoute = state.routes[index];
+    const route = indexedRoute?.from === from && indexedRoute?.to === to
+      ? indexedRoute
+      : state.routes.find((candidate) => candidate.from === from && candidate.to === to);
+    durations[`${from}>${to}`] = route ? routeDurationForPlanning(route) : 2 * 60 * 60;
+  });
+  return durations;
+}
+
+function autoScheduleCurrentTrip() {
+  const plan = state.tripPlan;
+  if (!plan || !Array.isArray(plan.days) || !plan.days.length) return;
+  if (plan.days.some((day) => day.manuallyEdited)) {
+    const confirmed = window.confirm(
+      "\u81ea\u52a8\u6392\u671f\u4f1a\u91cd\u65b0\u6309\u5f53\u524d\u8282\u594f\u62c6\u5206\u65e5\u671f\uff0c\u5e76\u8986\u76d6\u5df2\u6709\u624b\u52a8\u65e5\u671f\u5b89\u6392\u3002\u662f\u5426\u7ee7\u7eed\uff1f"
+    );
+    if (!confirmed) return;
+  }
+  const placeIds = routePlaceIds(plan);
+  const metadata = {
+    name: typeof plan.name === "string" && plan.name.trim() ? plan.name : DEFAULT_TRIP_NAME,
+    startDate: plan.startDate || null,
+    pace: plan.pace || state.tripPace,
+    transportMode: resolveTripTransportMode(plan)
+  };
+  const nextPlan = autoScheduleTrip({
+    placeIds,
+    durations: routeDurationsForAutoSchedule(placeIds),
+    paceProfile: tripPaceProfile(metadata.pace),
+    metadata
+  });
+  commitTripPlan(nextPlan, {
+    message: "\u5df2\u6309\u5f53\u524d\u884c\u7a0b\u8282\u594f\u91cd\u65b0\u81ea\u52a8\u6392\u671f\u3002"
+  });
+}
+
 function renderPanel() {
   const selected = placeById(state.selectedCityId);
   syncTransportButtons();
+  syncPaceButtons();
 
   if (state.viewMode === "city") {
     const activeCity = cityById(state.activeCityViewId);
-    const detailCounts = activeCity ? cityDetailCounts(activeCity) : { subareas: 0, landmarks: 0, stations: 0, subwayStations: 0 };
+    const detailCounts = activeCity ? cityDetailCounts(activeCity) : { subareas: 0, landmarks: 0, stations: 0, subwayStations: 0, foodArticles: 0 };
     const subareaText = state.activeDistrictBoundaryCount
       ? `${state.activeDistrictBoundaryCount} \u4e2a\u4e0b\u8f96\u533a\u57df\u8fb9\u754c`
       : `${detailCounts.subareas} \u4e2a\u533a\u53bf\u70b9`;
     selectionTitle.textContent = activeCity ? `\u57ce\u5e02\u89c6\u56fe\uff1a${activeCity.name}` : "\u57ce\u5e02\u89c6\u56fe";
     selectionHint.textContent = activeCity
-      ? `\u5df2\u9690\u85cf\u4e2d\u56fd\u603b\u56fe\uff0c\u6b63\u5728\u663e\u793a ${subareaText}\u3001${detailCounts.landmarks} \u4e2a\u5730\u6807/\u666f\u70b9\u3001${state.activeStationCount} \u4e2a\u706b\u8f66\u7ad9\u4e0e ${state.activeSubwayLineCount} \u6761\u5730\u94c1\u7ebf\u8def/${state.activeSubwayStationCount} \u4e2a\u5730\u94c1\u7ad9\uff0c\u533a\u53bf\u8fb9\u754c\u53ef\u70b9\u51fb\u7eb3\u5165\u884c\u7a0b\u3002`
+      ? `\u5df2\u9690\u85cf\u4e2d\u56fd\u603b\u56fe\uff0c\u6b63\u5728\u663e\u793a ${subareaText}\u3001${detailCounts.landmarks} \u4e2a\u5730\u6807/\u666f\u70b9\u3001${state.activeStationCount} \u4e2a\u706b\u8f66\u7ad9\u4e0e ${state.activeSubwayLineCount} \u6761\u5730\u94c1\u7ebf\u8def/${state.activeSubwayStationCount} \u4e2a\u5730\u94c1\u7ad9\u3001${state.activeFoodArticleCount} \u7bc7\u98df\u884c\u8bb0\uff0c\u533a\u53bf\u8fb9\u754c\u53ef\u70b9\u51fb\u7eb3\u5165\u884c\u7a0b\u3002`
       : "\u53cc\u51fb\u57ce\u5e02\u53ef\u8fdb\u5165\u72ec\u7acb\u57ce\u5e02\u89c6\u56fe\u3002";
   } else if (selected) {
     selectionTitle.textContent = labels.fromCity(selected.name);
@@ -1056,12 +1689,12 @@ function renderPanel() {
   emptyState.hidden = state.routes.length > 0;
   undoBtn.disabled = state.routes.length === 0;
   clearBtn.disabled = state.routes.length === 0 && !state.selectedCityId;
-  exportBtn.disabled = state.routes.length === 0;
+  syncTripArchiveControls();
   cityCount.textContent = String(state.cities.length);
   if (state.viewMode === "city") {
     const activeCity = cityById(state.activeCityViewId);
-    const detailCounts = activeCity ? cityDetailCounts(activeCity) : { subareas: 0, landmarks: 0, stations: 0, subwayStations: 0 };
-    availableCityCount.textContent = String(detailCounts.subareas + detailCounts.landmarks + state.activeStationCount + state.activeSubwayStationCount);
+    const detailCounts = activeCity ? cityDetailCounts(activeCity) : { subareas: 0, landmarks: 0, stations: 0, subwayStations: 0, foodArticles: 0 };
+    availableCityCount.textContent = String(detailCounts.subareas + detailCounts.landmarks + state.activeStationCount + state.activeSubwayStationCount + state.activeFoodArticleCount);
     if (mapBadgeLabel) mapBadgeLabel.textContent = "\u57ce\u5e02\u5185\u70b9\u4f4d";
   } else {
     availableCityCount.textContent = String(state.cities.length);
@@ -1071,6 +1704,57 @@ function renderPanel() {
   updateCityStyles();
   updateTotals();
   chainLabel.textContent = buildChainLabel();
+  renderTripPlanner();
+  renderFoodPanel();
+}
+
+function renderTripPlanner() {
+  if (!tripEditorRoot || !itineraryMeta || !itineraryEmptyState || !tripHealth) return;
+  if (typeof state.tripEditorDestroy === "function") state.tripEditorDestroy();
+  state.tripEditorDestroy = null;
+  tripEditorRoot.replaceChildren();
+
+  const plan = state.tripPlan;
+  const hasCalendar = Array.isArray(plan?.days) && plan.days.length > 0;
+  if (tripNameInput && document.activeElement !== tripNameInput) tripNameInput.value = plan?.name || "";
+  if (tripStartDateInput && document.activeElement !== tripStartDateInput) tripStartDateInput.value = plan?.startDate || "";
+  if (autoScheduleBtn) autoScheduleBtn.disabled = !hasCalendar;
+  if (undoTripEditBtn) undoTripEditBtn.disabled = state.tripHistory.length === 0;
+  itineraryEmptyState.hidden = hasCalendar;
+
+  if (!hasCalendar) {
+    itineraryMeta.textContent = "\u5f85\u751f\u6210";
+    tripHealth.hidden = true;
+    tripHealth.className = "trip-health";
+    tripHealth.textContent = "";
+    return;
+  }
+
+  const pace = tripPaceProfile(plan.pace);
+  const planPlaceIds = routePlaceIds(plan);
+  const warnings = validateTripPlan(plan, { paceProfile: pace });
+  itineraryMeta.textContent = `${plan.days.length} \u5929 \u00b7 ${pace.label} \u00b7 ${planPlaceIds.length} \u4e2a\u5730\u70b9`;
+  const errorCount = state.routes.filter((route) => route.status === "error").length;
+  const loadingCount = state.routes.filter((route) => route.status === "loading").length;
+  const healthMessages = [];
+  if (warnings.length) healthMessages.push(`\u53d1\u73b0 ${warnings.length} \u9879\u884c\u7a0b\u63d0\u9192`);
+  if (errorCount) healthMessages.push(`${errorCount} \u6bb5\u8def\u7ebf\u6682\u65f6\u65e0\u6cd5\u4f30\u7b97`);
+  else if (loadingCount) healthMessages.push(`\u6b63\u5728\u4f30\u7b97 ${loadingCount} \u6bb5\u8def\u7ebf`);
+  if (!healthMessages.length) healthMessages.push(`${plan.days.length} \u5929\u884c\u7a0b\u5df2\u4e0e\u5730\u56fe\u8def\u7ebf\u540c\u6b65`);
+  tripHealth.hidden = false;
+  tripHealth.className = `trip-health${errorCount || warnings.length ? " warning" : ""}`;
+  tripHealth.textContent = `${healthMessages.join("\uff1b")}\u3002`;
+
+  tripEditorRoot.innerHTML = renderTripEditorMarkup({
+    plan,
+    warnings,
+    placeName: (placeId) => placeById(placeId)?.name || placeId
+  });
+  state.tripEditorDestroy = mountTripEditor({
+    root: tripEditorRoot,
+    onCommand: handleTripCommand,
+    onEditRequest: openTripItemDialog
+  });
 }
 
 function updateTotals() {
@@ -1098,6 +1782,823 @@ function buildChainLabel() {
   const names = [placeById(state.routes[0].from).name];
   state.routes.forEach((route) => names.push(placeById(route.to).name));
   return names.join(" \u2192 ");
+}
+
+function routePlaces() {
+  if (state.routes.length) {
+    return [placeById(state.routes[0].from), ...state.routes.map((route) => placeById(route.to))].filter(Boolean);
+  }
+  return state.selectedCityId ? [placeById(state.selectedCityId)].filter(Boolean) : [];
+}
+
+function buildItineraryDays() {
+  const places = routePlaces();
+  const pace = tripPaceProfile();
+  if (!places.length) return [];
+  if (!state.routes.length) {
+    const day = createItineraryDay(places[0]);
+    finalizeItineraryDay(day, 1, pace);
+    return [day];
+  }
+
+  const days = [];
+  let day = createItineraryDay(placeById(state.routes[0].from));
+  state.routes.forEach((route) => {
+    const from = placeById(route.from);
+    const to = placeById(route.to);
+    if (!from || !to) return;
+    const duration = routeDurationForPlanning(route);
+    const shouldStartNewDay = day.routes.length
+      && (day.travelSeconds + duration > pace.dailyTravelLimitSeconds || day.places.length >= pace.maxDailyPlaces);
+
+    if (shouldStartNewDay) {
+      finalizeItineraryDay(day, days.length + 1, pace);
+      days.push(day);
+      day = createItineraryDay(from);
+    }
+
+    day.routes.push(route);
+    day.travelSeconds += duration;
+    if (day.places[day.places.length - 1]?.id !== to.id) day.places.push(to);
+  });
+
+  finalizeItineraryDay(day, days.length + 1, pace);
+  days.push(day);
+  return days;
+}
+
+function createItineraryDay(startPlace) {
+  return {
+    index: 0,
+    places: startPlace ? [startPlace] : [],
+    routes: [],
+    travelSeconds: 0,
+    overnight: startPlace || null
+  };
+}
+
+function finalizeItineraryDay(day, index, pace = tripPaceProfile()) {
+  day.index = index;
+  day.pace = pace;
+  day.overnight = day.places[day.places.length - 1] || null;
+  day.playSeconds = Math.max(0, pace.playWindowSeconds - day.travelSeconds);
+  day.warnings = itineraryDayWarnings(day, pace);
+}
+
+function routeDurationForPlanning(route) {
+  if (hasMetrics(route)) return route.duration;
+  return 2 * 60 * 60;
+}
+
+function itineraryDayWarnings(day, pace = tripPaceProfile()) {
+  const warnings = [];
+  if (day.routes.some((route) => route.status === "loading")) {
+    warnings.push("\u6709\u8def\u7ebf\u6b63\u5728\u8ba1\u7b97\uff0c\u5148\u628a\u5f53\u5929\u5f53\u4f5c\u8349\u6848\u3002");
+  }
+  if (day.routes.some((route) => route.fallback)) {
+    warnings.push("\u5305\u542b\u964d\u7ea7\u4f30\u7b97\uff0c\u51fa\u53d1\u524d\u9700\u8981\u6838\u5bf9\u5b9e\u9645\u8f66\u6b21\u3002");
+  }
+  if (day.travelSeconds > pace.hardTravelLimitSeconds) {
+    warnings.push(`\u8fd9\u5929\u8de8\u57ce\u8d85\u8fc7 ${formatDuration(pace.hardTravelLimitSeconds)}\uff0c\u5efa\u8bae\u62c6\u6210\u4e24\u5929\u3002`);
+  } else if (day.travelSeconds > pace.dailyTravelLimitSeconds) {
+    warnings.push(`\u8fd9\u5929\u8d85\u8fc7\u201c${pace.label}\u201d\u5f3a\u5ea6\u4e0a\u9650\uff0c\u5efa\u8bae\u53ea\u5b89\u6392 1-2 \u4e2a\u6838\u5fc3\u70b9\u3002`);
+  }
+  return warnings;
+}
+
+function renderItineraryPanel() {
+  if (!itineraryList || !itineraryMeta || !itineraryEmptyState || !tripHealth) return;
+  const days = buildItineraryDays();
+  itineraryList.replaceChildren();
+  itineraryEmptyState.hidden = days.length > 0;
+
+  if (!days.length) {
+    itineraryMeta.textContent = "\u5f85\u751f\u6210";
+    tripHealth.hidden = true;
+    return;
+  }
+
+  const pace = tripPaceProfile();
+  itineraryMeta.textContent = `${days.length} \u5929 \u00b7 ${pace.label} \u00b7 \u65e5\u5747\u8de8\u57ce\u4e0a\u9650 ${formatDuration(pace.dailyTravelLimitSeconds)}`;
+  const health = itineraryHealth(days);
+  tripHealth.hidden = false;
+  tripHealth.className = `trip-health${health.warning ? " warning" : ""}`;
+  tripHealth.textContent = health.text;
+
+  days.forEach((day) => {
+    const item = document.createElement("li");
+    item.className = "day-card";
+    item.innerHTML = itineraryDayHtml(day);
+    itineraryList.append(item);
+  });
+}
+
+function itineraryHealth(days) {
+  const warningDays = days.filter((day) => day.warnings.length);
+  if (warningDays.length) {
+    return {
+      warning: true,
+      text: `\u6709 ${warningDays.length} \u5929\u9700\u8981\u6838\u5bf9\u8282\u594f\uff1a${warningDays[0].warnings[0]}`
+    };
+  }
+  if (days.length === 1 && !state.routes.length) {
+    return {
+      warning: false,
+      text: "\u5df2\u9009\u8d77\u70b9\uff0c\u7ee7\u7eed\u9009\u57ce\u5e02\u540e\u4f1a\u81ea\u52a8\u62c6\u6210\u6bcf\u65e5\u884c\u7a0b\u3002"
+    };
+  }
+  return {
+    warning: false,
+    text: `${tripPaceProfile().description}\u5efa\u8bae\u628a\u8f66\u7968\u65f6\u523b\u548c\u666f\u70b9\u5f00\u653e\u65f6\u95f4\u4f5c\u4e3a\u6700\u7ec8\u786e\u8ba4\u3002`
+  };
+}
+
+function itineraryDayHtml(day) {
+  const cityLine = day.places.map((place) => escapeHtml(place.name)).join(" \u2192 ");
+  const overnight = day.overnight ? escapeHtml(day.overnight.name) : "\u5f85\u5b9a";
+  const travelText = day.routes.length
+    ? `${day.routes.length} \u6bb5\u8de8\u57ce \u00b7 ${formatDuration(day.travelSeconds)}`
+    : "\u672c\u5730\u6e38\u73a9";
+  const playText = day.playSeconds ? formatDuration(day.playSeconds) : "\u5f88\u5c11";
+  return `
+    <header>
+      <p class="day-meta">\u7b2c ${day.index} \u5929 \u00b7 \u8fc7\u591c ${overnight}</p>
+      <h3>${cityLine}</h3>
+      <p>${escapeHtml(travelText)} \u00b7 \u9884\u7559 ${escapeHtml(playText)} \u6e38\u73a9\u548c\u7528\u9910</p>
+    </header>
+    <ol class="day-plan">
+      ${dayPlanItems(day).map((item) => `<li><strong>${item.label}</strong> ${item.text}</li>`).join("")}
+    </ol>
+    <p class="day-note">${escapeHtml(day.warnings[0] || "\u53ef\u6309\u8f66\u6b21\u5b9e\u9645\u5230\u8fbe\u65f6\u95f4\u524d\u540e\u632a\u52a8\u4e0a\u5348\u548c\u4e0b\u5348\u5b89\u6392\uff0c\u665a\u4e0a\u4fdd\u7559\u5f39\u6027\u4f11\u606f\u3002")}</p>
+  `;
+}
+
+function dayPlanItems(day) {
+  const schedule = dayScheduleBlocks(day);
+  return [
+    { label: "\u4e0a\u5348", text: escapeHtml(schedule.morning) },
+    { label: "\u4e0b\u5348", text: escapeHtml(schedule.afternoon) },
+    { label: "\u665a\u4e0a", text: escapeHtml(schedule.evening) },
+    { label: "\u4f4f\u5bbf", text: escapeHtml(dayLodgingText(day)) }
+  ];
+}
+
+function dayScheduleBlocks(day) {
+  return {
+    morning: dayMorningText(day),
+    afternoon: dayAfternoonText(day),
+    evening: dayEveningText(day)
+  };
+}
+
+function dayMorningText(day) {
+  if (day.routes.length) {
+    return `${dayTransportText(day)}\u3002\u5efa\u8bae\u4e0a\u5348\u5b8c\u6210\u9000\u623f\u3001\u53d6\u7968\u548c\u8de8\u57ce\u79fb\u52a8\uff0c\u62b5\u8fbe\u540e\u5148\u5b89\u6392\u884c\u674e\u5bc4\u5b58\u6216\u9152\u5e97\u5165\u4f4f\u3002`;
+  }
+  const target = day.overnight || day.places[0];
+  const highlights = placeHighlightText(target, 2);
+  return highlights
+    ? `${target.name}\uff1a${highlights}\uff0c\u9002\u5408\u4ece\u9152\u5e97\u5468\u8fb9\u6216\u4ea4\u901a\u67a2\u7ebd\u9644\u8fd1\u5f00\u59cb\u3002`
+    : `${target?.name || "\u672c\u5730"}\uff1a\u5148\u719f\u6089\u9152\u5e97\u5468\u8fb9\u3001\u8f66\u7ad9\u548c\u4e3b\u5546\u5708\uff0c\u518d\u8fdb\u5165\u57ce\u5e02\u89c6\u56fe\u7ec6\u5316\u3002`;
+}
+
+function dayAfternoonText(day) {
+  const target = day.overnight || day.places[day.places.length - 1];
+  const highlights = placeHighlightText(target, 3);
+  if (highlights) return `${target.name}\uff1a\u628a\u4e3b\u8981\u6e38\u73a9\u65f6\u95f4\u7559\u7ed9 ${highlights}\u3002`;
+  if (target) {
+    return `${target.name}\uff1a\u62b5\u8fbe\u540e\u4f18\u5148\u5b89\u6392\u4e3b\u57ce\u533a\u3001\u8f66\u7ad9\u5468\u8fb9\u6216\u57ce\u5e02\u89c6\u56fe\u91cc\u7684\u5df2\u6807\u6ce8\u70b9\u3002`;
+  }
+  return dayHighlightText(day);
+}
+
+function dayEveningText(day) {
+  const target = day.overnight || day.places[day.places.length - 1];
+  const foods = placeFoodText(target, 5);
+  if (foods) return `${target.name}\uff1a\u665a\u9910\u4f18\u5148\u5c1d\u8bd5 ${foods}\uff0c\u9910\u540e\u9009\u9152\u5e97\u6216\u8f66\u7ad9\u5468\u8fb9\u8f7b\u677e\u6d3b\u52a8\u3002`;
+  return `${dayFoodText(day)}\u665a\u4e0a\u5efa\u8bae\u5c31\u8fd1\u7528\u9910\uff0c\u7ed9\u7b2c\u4e8c\u5929\u7559\u51fa\u4f11\u606f\u65f6\u95f4\u3002`;
+}
+
+function dayTransportText(day) {
+  if (!day.routes.length) return "\u672c\u65e5\u4e0d\u8de8\u57ce\uff0c\u9002\u5408\u4ece\u9152\u5e97\u5468\u8fb9\u5f00\u59cb\u8f7b\u677e\u719f\u6089\u57ce\u5e02\u3002";
+  return day.routes.map((route) => {
+    const from = placeById(route.from);
+    const to = placeById(route.to);
+    const label = route.transportLabel || transportProfile(route.transportMode).label;
+    const duration = hasMetrics(route) ? formatDuration(route.duration) : labels.pending;
+    return `${from?.name || ""} \u2192 ${to?.name || ""}\uff0c${label}\u7ea6 ${duration}`;
+  }).join("\uff1b");
+}
+
+function dayHighlightText(day) {
+  const sections = dayRecommendationPlaces(day)
+    .map((place) => {
+      const highlights = cityHighlightsForPlace(place).slice(0, 2);
+      if (highlights.length) return `${place.name}\uff1a${highlights.join("\u3001")}`;
+      if (day.overnight && place.id === day.overnight.id) {
+        return `${place.name}\uff1a\u62b5\u8fbe\u540e\u4f18\u5148\u5b89\u6392\u4e3b\u57ce\u533a\u3001\u8f66\u7ad9\u5468\u8fb9\u6216\u57ce\u5e02\u89c6\u56fe\u91cc\u7684\u5df2\u6807\u6ce8\u70b9`;
+      }
+      return "";
+    })
+    .filter(Boolean)
+    .slice(0, 3);
+  if (sections.length) return sections.join("\uff1b");
+  const target = day.overnight || day.places[day.places.length - 1];
+  return target
+    ? `\u62b5\u8fbe ${target.name} \u540e\uff0c\u8fdb\u5165\u57ce\u5e02\u89c6\u56fe\u4ece\u666f\u70b9\u3001\u533a\u53bf\u6216\u8f66\u7ad9\u70b9\u4f4d\u4e2d\u7ee7\u7eed\u7ec6\u5316\u3002`
+    : "\u8fdb\u5165\u57ce\u5e02\u89c6\u56fe\u540e\uff0c\u4ece\u666f\u70b9\u3001\u533a\u53bf\u6216\u8f66\u7ad9\u70b9\u4f4d\u4e2d\u7ee7\u7eed\u7ec6\u5316\u3002";
+}
+
+function cityHighlightsForPlace(place) {
+  const city = cityForPlace(place);
+  if (!city) return [];
+  const landmarks = cityLandmarks(city).slice(0, 3).map((landmark) => landmark.name);
+  if (landmarks.length) return landmarks;
+  return citySubareas(city).slice(0, 3).map((area) => area.name);
+}
+
+function placeHighlightText(place, limit = 3) {
+  const highlights = cityHighlightsForPlace(place).slice(0, limit);
+  return highlights.join("\u3001");
+}
+
+function dayFoodText(day) {
+  const sections = dayRecommendationPlaces(day)
+    .map((place) => {
+      const foods = uniqueByName(foodSuggestionsForPlace(place)).slice(0, 4);
+      return foods.length ? `${place.name}\uff1a${foods.join("\u3001")}` : "";
+    })
+    .filter(Boolean)
+    .slice(0, 3);
+  if (sections.length) return sections.join("\uff1b");
+  return "\u6682\u65e0\u5df2\u5339\u914d\u98df\u884c\u8bb0\uff0c\u53ef\u5148\u5c06\u665a\u9910\u7559\u7ed9\u5f53\u5730\u5c0f\u5403\u8857\u6216\u8f66\u7ad9\u5468\u8fb9\u3002";
+}
+
+function foodSuggestionsForPlace(place) {
+  const city = cityForPlace(place);
+  const articles = place?.placeType === "county" ? articlesForPlace(place.id) : articlesForCity(city?.id);
+  return (articles || []).slice(0, 3).flatMap((article) => (article.foods || []).slice(0, 3));
+}
+
+function placeFoodText(place, limit = 5) {
+  return uniqueByName(foodSuggestionsForPlace(place)).slice(0, limit).join("\u3001");
+}
+
+function dayLodgingText(day) {
+  if (!day.overnight) return "\u6682\u672a\u9009\u5b9a\u8fc7\u591c\u57ce\u5e02\u3002";
+  const city = cityForPlace(day.overnight);
+  const station = city ? cityStations(city)[0] : null;
+  if (station) {
+    const stationLabel = station.name.startsWith(day.overnight.name) ? station.name : `${day.overnight.name}${station.name}`;
+    return `\u5efa\u8bae\u4f4f\u5728${stationLabel}\u6216\u4e3b\u5546\u5708\u5468\u8fb9\uff0c\u65b9\u4fbf\u6b21\u65e5\u51fa\u53d1\u3002`;
+  }
+  return `\u5efa\u8bae\u4f4f\u5728${day.overnight.name}\u4e3b\u57ce\u533a\u6216\u4ea4\u901a\u67a2\u7ebd\u5468\u8fb9\uff0c\u65b9\u4fbf\u8854\u63a5\u6b21\u65e5\u8def\u7ebf\u3002`;
+}
+
+function dayRecommendationPlaces(day) {
+  const places = [];
+  if (day.overnight) places.push(day.overnight);
+  day.places.forEach((place) => {
+    if (place && !places.some((item) => item.id === place.id)) places.push(place);
+  });
+  return places;
+}
+
+function cityForPlace(place) {
+  if (!place) return null;
+  if (place.placeType === "county" && place.parentCityId) return cityById(place.parentCityId) || place;
+  return cityById(place.id) || place;
+}
+
+function uniqueByName(values) {
+  const seen = new Set();
+  return values.filter((value) => {
+    if (!value || seen.has(value)) return false;
+    seen.add(value);
+    return true;
+  });
+}
+
+function hasSerializableTrip() {
+  return Boolean(state.tripPlan);
+}
+
+function syncTripArchiveControls() {
+  const hasPlan = hasSerializableTrip();
+  const hasCalendar = Array.isArray(state.tripPlan?.days) && state.tripPlan.days.length > 0;
+  if (saveTripBtn) saveTripBtn.disabled = !hasPlan;
+  if (shareTripBtn) shareTripBtn.disabled = !hasPlan;
+  if (exportMarkdownBtn) exportMarkdownBtn.disabled = !hasCalendar;
+  if (exportHtmlBtn) exportHtmlBtn.disabled = !hasCalendar;
+  if (exportTripFileBtn) {
+    exportTripFileBtn.disabled = !canExportTripFile({
+      plan: state.tripPlan,
+      emergencyLegacyRaw: emergencyLegacyTripRaw
+    });
+  }
+}
+
+function rememberEmergencyLegacyTrip(raw) {
+  if (!canExportTripFile({ emergencyLegacyRaw: raw })) return false;
+  emergencyLegacyTripRaw = raw;
+  syncTripArchiveControls();
+  return true;
+}
+
+function clearEmergencyLegacyTrip() {
+  emergencyLegacyTripRaw = null;
+  syncTripArchiveControls();
+}
+
+function archiveFailureGuidance() {
+  if (canExportTripFile({
+    plan: state.tripPlan,
+    emergencyLegacyRaw: emergencyLegacyTripRaw
+  })) {
+    return "请点击页面上的“导出行程”保存文件后重试。";
+  }
+  return "请保持页面打开，并在浏览器设置中检查本站点数据权限后重试。";
+}
+
+function replaceBrowserUrl(nextUrl) {
+  window.history.replaceState(null, "", nextUrl);
+}
+
+function persistTripState(message = "\u5df2\u81ea\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002") {
+  if (!hasSerializableTrip()) {
+    return clearPersistedTripState();
+  }
+  lastTripPersistenceResult = writeTripPlanV2({
+    storage: tripArchiveStorage,
+    plan: state.tripPlan,
+    currentUrl: window.location.href,
+    replaceUrl: replaceBrowserUrl
+  });
+  if (!lastTripPersistenceResult.stored) {
+    updateArchiveStatus("本机存储失败，当前行程仍保留在本页；请立即点击页面上的“导出行程”保存文件备份。", "error");
+    return false;
+  }
+  if (!lastTripPersistenceResult.hashCleared) {
+    const savedMessage = String(message || "行程已保存").replace(/[。；\s]+$/g, "");
+    updateArchiveStatus(`${savedMessage}；但地址栏中的旧分享快照未能清理，请导出行程文件并避免刷新后使用旧快照。`, "error");
+    return true;
+  }
+  updateArchiveStatus(message, "success");
+  return true;
+}
+
+function finalizeLegacyTripBackup(message) {
+  if (!legacyTripBackupPending) return true;
+  const savedMessage = String(message || "行程已保存").replace(/[。；\s]+$/g, "");
+  const result = finalizeLegacyMigration({ storage: tripArchiveStorage });
+  legacyTripBackupPending = !result.ok;
+  if (!result.ok) {
+    const hashWarning = lastTripPersistenceResult.hashCleared ? "" : "，且地址栏旧分享快照未能清理";
+    updateArchiveStatus(`${savedMessage}；但旧版 v1 存档或迁移备份未完全清理${hashWarning}。`, "error");
+    return false;
+  }
+  if (!lastTripPersistenceResult.hashCleared) {
+    updateArchiveStatus(`${savedMessage}；旧版 v1 存档与迁移备份已清理，但地址栏旧分享快照未能清理。`, "error");
+    return true;
+  }
+  updateArchiveStatus(`${savedMessage}；旧版 v1 存档与迁移备份已清理。`, "success");
+  return true;
+}
+
+function clearPersistedTripState() {
+  clearEmergencyLegacyTrip();
+  const result = clearTripArchive({
+    storage: tripArchiveStorage,
+    currentUrl: window.location.href,
+    replaceUrl: replaceBrowserUrl
+  });
+  legacyTripBackupPending = result.failedKeys.some((key) => (
+    key === LEGACY_TRIP_STORAGE_KEY || key === LEGACY_TRIP_BACKUP_KEY
+  ));
+  if (result.ok) {
+    updateArchiveStatus("行程已清空，v2、旧版与迁移备份均已移除。", "success");
+    return true;
+  }
+  updateArchiveStatus("行程已清空，但部分本机存档或分享地址未能移除；请检查浏览器站点数据。", "error");
+  return false;
+}
+
+function isTripStateRecord(value) {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function prepareTripMigration(data, { allowLegacy = false } = {}) {
+  if (!isTripStateRecord(data)) throw new TypeError("行程文件格式无效");
+  const hasVersion = Object.hasOwn(data, "version");
+  const isLegacy = !hasVersion || data.version === 1;
+  if (isLegacy && !allowLegacy) throw new TypeError("分享链接不是 v2 行程");
+
+  if (!isLegacy) {
+    if (data.version !== TRIP_PLAN_VERSION) throw new TypeError("不支持的行程版本");
+    return {
+      data,
+      isLegacy: false,
+      paceProfile: tripPaceProfile()
+    };
+  }
+
+  if (!isLegacyTripPayload(data)) throw new TypeError("旧版行程格式无效");
+  const routes = (Array.isArray(data.routes) ? data.routes : [])
+    .filter((route) => {
+      if (!isTripStateRecord(route)) return false;
+      const from = tripIdentifier(route.from);
+      const to = tripIdentifier(route.to);
+      return Boolean(from && to && placeById(from) && placeById(to));
+    })
+    .map((route) => ({
+      ...route,
+      from: tripIdentifier(route.from),
+      to: tripIdentifier(route.to)
+    }));
+  const selectedCityId = tripIdentifier(data.selectedCityId);
+  const pace = tripPaceProfiles[data.tripPace] ? data.tripPace : state.tripPace;
+  return {
+    data: {
+      ...data,
+      routes,
+      selectedCityId: selectedCityId && placeById(selectedCityId) ? selectedCityId : null
+    },
+    isLegacy: true,
+    paceProfile: tripPaceProfile(pace)
+  };
+}
+
+function assertTripPlanCanRender(plan, { isLegacy = false } = {}) {
+  const placeIds = routePlaceIds(plan);
+  if (placeIds.some((placeId) => !placeById(placeId))) {
+    throw new TypeError("行程包含当前地图无法识别的地点");
+  }
+  if (isLegacy && !placeIds.length) {
+    throw new TypeError("旧版行程没有可恢复的地点");
+  }
+  return plan;
+}
+
+function captureTripImportSnapshot() {
+  return {
+    tripPlan: state.tripPlan,
+    tripHistory: state.tripHistory.slice(),
+    transportMode: state.transportMode,
+    tripPace: state.tripPace,
+    routes: state.routes,
+    selectedCityId: state.selectedCityId,
+    nextRouteId: state.nextRouteId,
+    archiveSnapshot: captureTripArchiveSnapshot({ storage: tripArchiveStorage }),
+    legacyTripBackupPending,
+    lastTripPersistenceResult,
+    emergencyLegacyTripRaw
+  };
+}
+
+function rollbackTripImportSnapshot(snapshot, {
+  restorePlan = false,
+  restoreV2 = false,
+  restoreBackup = false
+} = {}) {
+  let restored = true;
+  legacyTripBackupPending = snapshot.legacyTripBackupPending;
+  lastTripPersistenceResult = snapshot.lastTripPersistenceResult;
+  emergencyLegacyTripRaw = snapshot.emergencyLegacyTripRaw;
+  const keys = [
+    ...(restoreV2 ? [TRIP_STORAGE_KEY] : []),
+    ...(restoreBackup ? [LEGACY_TRIP_BACKUP_KEY] : [])
+  ];
+  if (keys.length) {
+    const storageResult = restoreTripArchiveSnapshot({
+      storage: tripArchiveStorage,
+      snapshot: snapshot.archiveSnapshot,
+      keys
+    });
+    restored = storageResult.ok && restored;
+  }
+  if (restorePlan) {
+    state.tripPlan = snapshot.tripPlan;
+    state.tripHistory = snapshot.tripHistory.slice();
+    state.transportMode = snapshot.transportMode;
+    state.tripPace = snapshot.tripPace;
+    state.routes = snapshot.routes;
+    state.selectedCityId = snapshot.selectedCityId;
+    state.nextRouteId = snapshot.nextRouteId;
+    try {
+      syncTransportButtons();
+      syncPaceButtons();
+      renderRoutes();
+      renderPanel();
+    } catch (error) {
+      restored = false;
+    }
+  }
+  syncTripArchiveControls();
+  return restored;
+}
+
+function restoredTripMessage(source, failures) {
+  const fallback = failures.size ? `${[...failures].join("、")}不可用；` : "";
+  if (source === "hash") return `${fallback}已从分享链接恢复 v2 行程并保存到本机。`;
+  if (source === "legacy") {
+    return `${fallback}已迁移旧版行程并保存为 v2；原始备份会在第一次有效编辑保存后清理。`;
+  }
+  return `${fallback}已从本机 v2 存档恢复行程。`;
+}
+
+function restoreTripState() {
+  const failures = new Set();
+  try {
+    legacyTripBackupPending = legacyMigrationPending({ storage: tripArchiveStorage });
+  } catch (error) {
+    legacyTripBackupPending = false;
+    failures.add("旧版迁移状态读取失败");
+  }
+  const candidates = readTripRecoveryCandidates({
+    storage: tripArchiveStorage,
+    currentUrl: window.location.href
+  });
+
+  for (const candidate of candidates) {
+    if (candidate.error) {
+      failures.add(`${candidate.label}读取失败`);
+      continue;
+    }
+
+    const previousPending = legacyTripBackupPending;
+    let legacyArchiveSnapshot = null;
+    let backupTouched = false;
+    let commitAttempted = false;
+    try {
+      const data = JSON.parse(candidate.raw);
+      const prepared = prepareTripMigration(data, { allowLegacy: candidate.allowLegacy });
+      if (candidate.requireLegacy && !prepared.isLegacy) {
+        throw new TypeError("旧版存档键中不是 v1 行程");
+      }
+      if (prepared.isLegacy) {
+        try {
+          legacyArchiveSnapshot = captureTripArchiveSnapshot({
+            storage: tripArchiveStorage,
+            keys: [LEGACY_TRIP_BACKUP_KEY]
+          });
+        } catch (error) {
+          failures.add("旧版存档备份状态读取失败，未执行迁移");
+          rememberEmergencyLegacyTrip(candidate.raw);
+          continue;
+        }
+        const backupResult = backupLegacyTripRaw({
+          storage: tripArchiveStorage,
+          raw: candidate.raw
+        });
+        if (!backupResult.ok) {
+          failures.add("旧版存档备份失败，未执行迁移");
+          rememberEmergencyLegacyTrip(candidate.raw);
+          continue;
+        }
+        backupTouched = true;
+        legacyTripBackupPending = true;
+      }
+      const migrated = migrateTripState(prepared.data, { paceProfile: prepared.paceProfile });
+      const plan = normalizeTripPlan(migrated);
+      assertTripPlanCanRender(plan, { isLegacy: prepared.isLegacy });
+
+      commitAttempted = true;
+      const committed = commitTripPlan(plan, {
+        recordHistory: false,
+        completeLegacyMigration: false,
+        message: restoredTripMessage(candidate.source, failures)
+      });
+      clearEmergencyLegacyTrip();
+      if (!committed) return true;
+      return true;
+    } catch (error) {
+      if (backupTouched && !commitAttempted) {
+        const rollback = restoreTripArchiveSnapshot({
+          storage: tripArchiveStorage,
+          snapshot: legacyArchiveSnapshot,
+          keys: [LEGACY_TRIP_BACKUP_KEY]
+        });
+        if (rollback.ok) {
+          legacyTripBackupPending = previousPending;
+        } else {
+          legacyTripBackupPending = true;
+          rememberEmergencyLegacyTrip(candidate.raw);
+          failures.add("旧版存档备份回滚失败");
+        }
+      }
+      failures.add(`${candidate.label}格式无效`);
+    }
+  }
+
+  if (failures.size) {
+    const backupFailure = [...failures].some((failure) => failure.includes("备份"));
+    const storageFailure = [...failures].some((failure) => failure.includes("读取失败"));
+    const guidance = canExportTripFile({ emergencyLegacyRaw: emergencyLegacyTripRaw })
+      ? "请点击页面上的“导出行程”保存原始 v1 文件后重试。"
+      : storageFailure
+        ? "请保持页面打开，并在浏览器设置中检查本站点数据权限后重试。"
+        : "";
+    updateArchiveStatus(
+      `${[...failures].join("、")}。当前行程未更改。${backupFailure || storageFailure ? guidance : ""}`,
+      "error"
+    );
+  } else {
+    updateArchiveStatus("行程会自动保存到本机。");
+  }
+  return false;
+}
+
+function downloadTripFile(plan) {
+  const filename = tripFileName(plan, new Date());
+  downloadTextFile(tripFileText(plan), filename, "application/json;charset=utf-8");
+  return filename;
+}
+
+function exportTripFile() {
+  const exportPayload = tripFileExportPayload({
+    plan: state.tripPlan,
+    emergencyLegacyRaw: emergencyLegacyTripRaw,
+    timestamp: new Date()
+  });
+  if (!exportPayload) {
+    updateArchiveStatus("当前没有可导出的行程。", "error");
+    syncTripArchiveControls();
+    return;
+  }
+  try {
+    downloadTextFile(exportPayload.text, exportPayload.filename, "application/json;charset=utf-8");
+    if (exportPayload.kind === "legacy-emergency") {
+      clearEmergencyLegacyTrip();
+      updateArchiveStatus(`已导出旧版应急行程文件 ${exportPayload.filename}；可用“导入行程”重新导入。`, "success");
+    } else {
+      updateArchiveStatus(`已导出行程文件 ${exportPayload.filename}。`, "success");
+    }
+  } catch (error) {
+    updateArchiveStatus("行程文件导出失败，当前行程仍保留在本页，请重试。", "error");
+  }
+}
+
+async function copyShareLink() {
+  if (!hasSerializableTrip()) return;
+  const persisted = persistTripState("已保存，正在准备分享。");
+  const hashCleared = persisted && lastTripPersistenceResult.hashCleared;
+  const shareUrl = shareUrlForTrip(state.tripPlan, window.location.href);
+  if (shouldUseTripFile(shareUrl)) {
+    try {
+      const filename = downloadTripFile(state.tripPlan);
+      if (!persisted) {
+        updateArchiveStatus(`本机存储失败，但当前行程仍保留并已导出 ${filename}。`, "error");
+      } else if (!hashCleared) {
+        updateArchiveStatus(`分享内容较大，已导出 ${filename}；但地址栏旧分享快照未能清理。`, "error");
+      } else {
+        updateArchiveStatus(`分享内容较大，已导出 ${filename}，请发送该行程文件。`, "success");
+      }
+    } catch (error) {
+      updateArchiveStatus("行程文件导出失败，当前行程仍保留在本页，请重试。", "error");
+    }
+    return;
+  }
+
+  let copied = false;
+  try {
+    await navigator.clipboard.writeText(shareUrl);
+    copied = true;
+  } catch (error) {
+    copied = false;
+  }
+
+  if (copied) {
+    if (!persisted) {
+      updateArchiveStatus("分享链接已复制，但本机存储失败；请另行导出行程文件备份。", "error");
+    } else if (!hashCleared) {
+      updateArchiveStatus("分享链接已复制且 v2 已保存，但地址栏旧分享快照未能清理。", "error");
+    } else {
+      updateArchiveStatus("分享链接已复制，同行者打开后可恢复完整行程。", "success");
+    }
+    return;
+  }
+
+  let addressUpdated = false;
+  try {
+    replaceBrowserUrl(shareUrl);
+    addressUpdated = true;
+  } catch (error) {
+    addressUpdated = false;
+  }
+
+  if (addressUpdated) {
+    if (!persisted) {
+      updateArchiveStatus("本机存储和剪贴板均不可用，短链接已放到地址栏；请导出行程文件备份。", "error");
+    } else {
+      updateArchiveStatus("剪贴板不可用，已将短链接放到地址栏。", "success");
+    }
+  } else {
+    updateArchiveStatus("分享链接复制失败，当前行程未受影响；请导出行程文件备份。", "error");
+  }
+}
+
+async function importTripFile(event) {
+  const input = event.currentTarget;
+  const file = input?.files?.[0];
+  let snapshot = null;
+  let backupTouched = false;
+  let commitAttempted = false;
+  let failureReason = "invalid";
+  let rawText = null;
+  try {
+    if (!file) return;
+    rawText = await file.text();
+    const data = JSON.parse(rawText);
+    const prepared = prepareTripMigration(data, { allowLegacy: true });
+    if (prepared.isLegacy) {
+      try {
+        snapshot = captureTripImportSnapshot();
+      } catch (error) {
+        failureReason = "backup";
+        rememberEmergencyLegacyTrip(rawText);
+        throw error;
+      }
+      const backupResult = backupLegacyTripRaw({
+        storage: tripArchiveStorage,
+        raw: rawText
+      });
+      if (!backupResult.ok) {
+        failureReason = "backup";
+        rememberEmergencyLegacyTrip(rawText);
+        throw new Error("legacy trip backup failed");
+      }
+      backupTouched = true;
+      legacyTripBackupPending = true;
+    }
+
+    const migrated = migrateTripState(prepared.data, { paceProfile: prepared.paceProfile });
+    const plan = normalizeTripPlan(migrated);
+    assertTripPlanCanRender(plan, { isLegacy: prepared.isLegacy });
+    if (!snapshot) {
+      try {
+        snapshot = captureTripImportSnapshot();
+      } catch (error) {
+        failureReason = "storage";
+        throw error;
+      }
+    }
+
+    commitAttempted = true;
+    failureReason = "commit";
+    const committed = commitTripPlan(plan, {
+      completeLegacyMigration: false,
+      message: prepared.isLegacy
+        ? "旧版行程文件已迁移并保存为 v2；原始备份会在下一次有效编辑保存后清理。"
+        : "v2 行程文件已导入并保存到本机。"
+    });
+    if (!committed) {
+      throw new Error("trip import commit failed");
+    }
+    clearEmergencyLegacyTrip();
+  } catch (error) {
+    let rollbackSucceeded = true;
+    if (snapshot) {
+      legacyTripBackupPending = snapshot.legacyTripBackupPending;
+      if (backupTouched || commitAttempted) {
+        rollbackSucceeded = rollbackTripImportSnapshot(snapshot, {
+          restorePlan: commitAttempted,
+          restoreV2: commitAttempted,
+          restoreBackup: backupTouched
+        });
+      }
+    }
+
+    if (!rollbackSucceeded) {
+      updateArchiveStatus(`行程导入失败，且无法完全恢复导入前状态；${archiveFailureGuidance()}`, "error");
+    } else if (failureReason === "backup") {
+      updateArchiveStatus("旧版行程原文备份失败，未执行导入；当前行程、历史和 v2 存档均未更改。请点击页面上的“导出行程”保存刚选择的 v1 文件，并检查本机存储。", "error");
+    } else if (failureReason === "storage") {
+      updateArchiveStatus(`本机存储不可用，无法安全导入；当前行程和历史未更改。${archiveFailureGuidance()}`, "error");
+    } else if (failureReason === "commit") {
+      updateArchiveStatus(`行程文件保存失败，已恢复导入前的行程、历史和存档；${archiveFailureGuidance()}`, "error");
+    } else {
+      updateArchiveStatus("行程文件无效或无法读取，当前行程、编辑历史和本机存档均未更改。", "error");
+    }
+  } finally {
+    if (input) input.value = "";
+  }
+}
+
+function updateArchiveStatus(message, tone = "") {
+  if (!tripArchiveStatus) return;
+  tripArchiveStatus.textContent = message;
+  tripArchiveStatus.className = `archive-status${tone ? ` ${tone}` : ""}`;
+}
+
+function setMobileView(view) {
+  if (!appShell || !["plan", "map"].includes(view)) return;
+  appShell.classList.toggle("mobile-plan", view === "plan");
+  appShell.classList.toggle("mobile-map", view === "map");
+  mobileViewButtons.forEach((button) => {
+    const active = button.dataset.mobileView === view;
+    button.classList.toggle("active", active);
+    button.setAttribute("aria-selected", String(active));
+  });
 }
 
 function placeContext(place) {
@@ -1214,6 +2715,12 @@ function exitCityView(options = {}) {
 async function renderCityDetail(city) {
   state.cityDetailLayer.clearLayers();
   const detailBounds = L.latLngBounds([]);
+  await Promise.all([
+    ensureCityCounties(city.id),
+    ensureCityFoodArticles(city.id)
+  ]);
+  if (state.viewMode !== "city" || state.activeCityViewId !== city.id) return;
+
   const sourceLayer = state.cityFeatureLayers.get(city.id);
   const subareas = citySubareas(city);
   const districtData = await fetchCityDistrictBoundaries(city);
@@ -1370,6 +2877,8 @@ async function renderCityDetail(city) {
       .addTo(state.cityDetailLayer);
   });
 
+  renderFoodArticleMarkers(city, detailBounds);
+
   if (!detailBounds.isValid()) return;
   state.map.fitBounds(detailBounds.pad(0.18), {
     paddingTopLeft: [28, 28],
@@ -1463,10 +2972,14 @@ function addDetailLabel(name, lat, lon, className, fontSize) {
 }
 
 function citySubareas(city) {
-  const direct = state.counties.filter((county) => county.parentCityId === city.id);
+  const direct = state.counties.filter((county) => county.parentCityId === city.id && hasCoordinates(county));
   if (direct.length) return direct;
   if (city.isRegion) return state.cities.filter((item) => item.province === city.province && item.id !== city.id);
   return [];
+}
+
+function hasCoordinates(place) {
+  return Number.isFinite(Number(place && place.lon)) && Number.isFinite(Number(place && place.lat));
 }
 
 function catalogEntry(catalog, city) {
@@ -2041,21 +3554,225 @@ function cityDetailCounts(city) {
     subareas: citySubareas(city).length,
     landmarks: state.activeLandmarkCount || cityLandmarks(city).length,
     stations: state.activeStationCount,
-    subwayStations: state.activeSubwayStationCount
+    subwayStations: state.activeSubwayStationCount,
+    foodArticles: articleCountForCity(city.id)
   };
+}
+
+function articlesForCity(cityId) {
+  return state.foodArticlesByCity.get(cityId) || [];
+}
+
+function articlesForPlace(placeId) {
+  return state.foodArticlesByPlace.get(placeId) || [];
+}
+
+async function ensureCityCounties(cityId) {
+  if (!cityId || state.loadedCountyCityIds.has(cityId)) return citySubareas(cityById(cityId));
+  if (state.countyLoadPromises.has(cityId)) return state.countyLoadPromises.get(cityId);
+
+  const promise = loadOptionalJson(`./data/counties/by-city/${cityId}.json`, { quiet: true })
+    .then((data) => {
+      const counties = data && Array.isArray(data.counties) ? data.counties : [];
+      mergeCountyRecords(counties);
+      state.loadedCountyCityIds.add(cityId);
+      return counties;
+    })
+    .finally(() => state.countyLoadPromises.delete(cityId));
+
+  state.countyLoadPromises.set(cityId, promise);
+  return promise;
+}
+
+async function ensureCityFoodArticles(cityId) {
+  if (!cityId || state.loadedFoodArticleCityIds.has(cityId)) return articlesForCity(cityId);
+  if (state.foodArticleLoadPromises.has(cityId)) return state.foodArticleLoadPromises.get(cityId);
+
+  const promise = loadOptionalJson(`./data/food-articles/by-city/${cityId}.json`, { quiet: true })
+    .then((data) => {
+      const articles = data && Array.isArray(data.articles) ? data.articles : [];
+      mergeFoodArticleRecords(articles);
+      state.loadedFoodArticleCityIds.add(cityId);
+      return articles;
+    })
+    .finally(() => state.foodArticleLoadPromises.delete(cityId));
+
+  state.foodArticleLoadPromises.set(cityId, promise);
+  return promise;
+}
+
+function articleCountForCity(cityId) {
+  return articlesForCity(cityId).length;
+}
+
+function articleCountForPlace(placeId) {
+  return articlesForPlace(placeId).length;
+}
+
+function selectedFoodArticles() {
+  const selected = state.selectedCityId ? placeById(state.selectedCityId) : null;
+  if (selected && selected.placeType === "county") return articlesForPlace(selected.id);
+  if (selected && selected.placeType === "city") return articlesForCity(selected.id);
+  if (state.viewMode === "city" && state.activeCityViewId) return articlesForCity(state.activeCityViewId);
+  return [];
+}
+
+function renderFoodPanel() {
+  if (!foodArticleList || !foodArticleCount || !foodEmptyState) return;
+  const articles = selectedFoodArticles();
+  foodArticleCount.textContent = `${articles.length} 篇`;
+  foodArticleList.replaceChildren();
+  foodEmptyState.hidden = articles.length > 0;
+
+  articles.slice(0, 8).forEach((article) => {
+    const card = document.createElement("article");
+    card.className = "food-card";
+    const readerPath = articleReaderPath(article);
+    const coverImage = articleCoverImage(article);
+    const cover = coverImage
+      ? `<img src="${escapeHtml(coverImage)}" alt="" loading="lazy" />`
+      : `<span class="food-card-placeholder">食</span>`;
+    card.innerHTML = `
+      <a class="food-card-media" href="${escapeHtml(readerPath)}" target="_blank" rel="noopener">${cover}</a>
+      <div class="food-card-body">
+        <p>${article.day ? `第 ${article.day} 天` : "食行记"} · ${escapeHtml(article.locationText || article.cityName)}</p>
+        <h3><a href="${escapeHtml(readerPath)}" target="_blank" rel="noopener">${escapeHtml(article.title)}</a></h3>
+        <span>${escapeHtml((article.foods || []).slice(0, 5).join("、") || article.description)}</span>
+      </div>
+    `;
+    foodArticleList.append(card);
+  });
+}
+
+function renderFoodArticleMarkers(city, detailBounds) {
+  const articles = articlesForCity(city.id);
+  const markerArticles = articles.filter(hasCoordinates);
+  state.activeFoodArticleCount = articles.length;
+  if (!markerArticles.length) return;
+
+  const placeOffsets = new Map();
+  markerArticles.forEach((article) => {
+    const offsetIndex = placeOffsets.get(article.placeId) || 0;
+    placeOffsets.set(article.placeId, offsetIndex + 1);
+    const offset = foodMarkerOffset(offsetIndex);
+    const lat = Number(article.lat) + offset.lat;
+    const lon = Number(article.lon) + offset.lon;
+    detailBounds.extend([lat, lon]);
+    L.marker([lat, lon], {
+      pane: "foodMarkers",
+      icon: L.divIcon({
+        className: "",
+        html: `<span class="food-marker"><span>食</span></span>`,
+        iconSize: [22, 22],
+        iconAnchor: [11, 11]
+      })
+    })
+      .bindTooltip(`${article.title} / 食行记`, {
+        className: "city-tooltip",
+        direction: "top",
+        offset: [0, -8],
+        opacity: 1,
+        sticky: true
+      })
+      .bindPopup(foodArticlePopupHtml(article), {
+        className: "food-popup-shell",
+        maxWidth: 320,
+        minWidth: 250
+      })
+      .addTo(state.cityDetailLayer);
+  });
+}
+
+function foodMarkerOffset(index) {
+  if (!index) return { lat: 0, lon: 0 };
+  const angle = index * 1.9;
+  const radius = Math.min(0.035, 0.006 + index * 0.0025);
+  return {
+    lat: Math.sin(angle) * radius,
+    lon: Math.cos(angle) * radius
+  };
+}
+
+function foodArticlePopupHtml(article) {
+  const readerPath = articleReaderPath(article);
+  const coverImage = articleCoverImage(article);
+  const cover = coverImage
+    ? `<img class="food-popup-cover" src="${escapeHtml(coverImage)}" alt="" loading="lazy" />`
+    : "";
+  const foods = (article.foods || []).slice(0, 8).map((food) => `<span>${escapeHtml(food)}</span>`).join("");
+  return `
+    <article class="food-popup">
+      ${cover}
+      <p class="food-popup-kicker">${article.day ? `第 ${article.day} 天` : "食行记"} · ${escapeHtml(article.locationText || article.cityName)}</p>
+      <h3>${escapeHtml(article.title)}</h3>
+      <p>${escapeHtml(article.description || "")}</p>
+      <div class="food-tags">${foods}</div>
+      <div class="food-popup-actions">
+        <a href="${escapeHtml(readerPath)}" target="_blank" rel="noopener">${article.pdfPath ? "打开 PDF" : "打开图文页"}</a>
+        ${article.url ? `<a href="${escapeHtml(article.url)}" target="_blank" rel="noopener">原文</a>` : ""}
+      </div>
+    </article>
+  `;
+}
+
+function articleReaderPath(article) {
+  if (!shouldUseLocalArticleAssets() && article.url) return article.url;
+  return article.readerPath || article.pdfPath || article.htmlPath || article.markdownPath || article.url || "#";
+}
+
+function articleCoverImage(article) {
+  return shouldUseLocalArticleAssets() ? article.coverImage : "";
+}
+
+function shouldUseLocalArticleAssets() {
+  return ["", "localhost", "127.0.0.1"].includes(window.location.hostname);
 }
 
 function transportProfile(mode = state.transportMode) {
   return transportProfiles[mode] || transportProfiles.highspeed;
 }
 
+function tripPaceProfile(mode = state.tripPace) {
+  return tripPaceProfiles[mode] || tripPaceProfiles.standard;
+}
+
 function setTransportMode(mode) {
   if (!transportProfiles[mode] || state.transportMode === mode) return;
+  if (state.tripPlan) {
+    const result = applyTripCommand(state.tripPlan, {
+      type: "update-metadata",
+      patch: { transportMode: mode }
+    });
+    if (result.changed) {
+      commitTripPlan(result.plan, {
+        message: "\u5df2\u66f4\u65b0\u4ea4\u901a\u65b9\u5f0f\u5e76\u4fdd\u5b58\u3002"
+      });
+    }
+    return;
+  }
   state.transportMode = mode;
   syncTransportButtons();
   recalculateRoutesForTransport();
   renderRoutes();
   renderPanel();
+  updateArchiveStatus("\u4ea4\u901a\u65b9\u5f0f\u5df2\u66f4\u65b0\uff0c\u9009\u62e9\u57ce\u5e02\u540e\u4f1a\u81ea\u52a8\u4fdd\u5b58\u3002");
+}
+
+function setTripPace(pace) {
+  if (!tripPaceProfiles[pace] || state.tripPace === pace) return;
+  state.tripPace = pace;
+  syncPaceButtons();
+  if (state.tripPlan) {
+    const nextPlan = structuredClone(state.tripPlan);
+    nextPlan.pace = pace;
+    nextPlan.savedAt = new Date().toISOString();
+    commitTripPlan(nextPlan, {
+      message: "\u5df2\u66f4\u65b0\u884c\u7a0b\u5f3a\u5ea6\u5e76\u4fdd\u5b58\u3002"
+    });
+    return;
+  }
+  renderPanel();
+  updateArchiveStatus("\u884c\u7a0b\u5f3a\u5ea6\u5df2\u66f4\u65b0\uff0c\u9009\u62e9\u57ce\u5e02\u540e\u4f1a\u81ea\u52a8\u4fdd\u5b58\u3002");
 }
 
 function syncTransportButtons() {
@@ -2066,11 +3783,29 @@ function syncTransportButtons() {
   });
 }
 
+function syncPaceButtons() {
+  paceButtons.forEach((button) => {
+    const isActive = button.dataset.pace === state.tripPace;
+    button.classList.toggle("active", isActive);
+    button.setAttribute("aria-checked", String(isActive));
+  });
+}
+
 function recalculateRoutesForTransport() {
   state.routes.forEach((route) => {
     const from = placeById(route.from);
     const to = placeById(route.to);
     if (!from || !to) return;
+    if (!hasCoordinates(from) || !hasCoordinates(to)) {
+      Object.assign(route, {
+        status: "error",
+        distance: null,
+        duration: null,
+        fallback: true,
+        error: "\u7f3a\u5c11\u5750\u6807\uff0c\u65e0\u6cd5\u4f30\u7b97\u884c\u7a0b"
+      });
+      return;
+    }
 
     const estimate = estimateRailRoute(from, to, state.transportMode);
     Object.assign(route, {
@@ -2089,36 +3824,28 @@ function handlePlaceClick(placeId) {
   const place = placeById(placeId);
   if (!place) return;
 
-  if (!state.selectedCityId) {
+  if (!state.tripPlan) {
+    const requestedName = tripNameInput?.value.trim();
+    const plan = createTripPlan({
+      placeIds: [placeId],
+      ...(requestedName ? { name: requestedName } : {}),
+      startDate: tripStartDateInput?.value || null,
+      pace: state.tripPace,
+      transportMode: state.transportMode
+    });
+    commitTripPlan(plan, { recordHistory: false });
+    return;
+  }
+
+  const currentPlaceIds = routePlaceIds(state.tripPlan);
+  if (currentPlaceIds.at(-1) === placeId) {
     state.selectedCityId = placeId;
     renderPanel();
     return;
   }
 
-  if (state.selectedCityId === placeId) {
-    state.selectedCityId = null;
-    renderPanel();
-    return;
-  }
-
-  const route = {
-    id: state.nextRouteId,
-    from: state.selectedCityId,
-    to: placeId,
-    status: "loading",
-    distance: null,
-    duration: null,
-    fallback: false,
-    error: null,
-    transportMode: state.transportMode,
-    transportLabel: transportProfile().label
-  };
-  state.nextRouteId += 1;
-  state.routes.push(route);
-  state.selectedCityId = placeId;
-  renderRoutes();
-  renderPanel();
-  calculateRouteMetrics(route);
+  const result = reconcileRoutePlaces(state.tripPlan, [...currentPlaceIds, placeId]);
+  commitTripPlan(result.plan);
 }
 
 function handleCityClick(cityId) {
@@ -2129,6 +3856,17 @@ function calculateRouteMetrics(route) {
   const from = placeById(route.from);
   const to = placeById(route.to);
   if (!from || !to) return;
+  if (!hasCoordinates(from) || !hasCoordinates(to)) {
+    updateRouteMetrics(route, {
+      status: "error",
+      distance: null,
+      duration: null,
+      fallback: true,
+      error: "\u7f3a\u5c11\u5750\u6807\uff0c\u65e0\u6cd5\u4f30\u7b97\u884c\u7a0b"
+    });
+    return;
+  }
+
   const estimate = estimateRailRoute(from, to, route.transportMode || state.transportMode);
 
   updateRouteMetrics(route, {
@@ -2147,6 +3885,7 @@ function updateRouteMetrics(route, updates) {
   Object.assign(route, updates);
   renderRoutes();
   renderPanel();
+  persistTripState();
 }
 
 function estimateRailRoute(from, to, mode = state.transportMode) {
@@ -2176,67 +3915,140 @@ function toRadians(degrees) {
 }
 
 function undoRoute() {
-  const removed = state.routes.pop();
-  if (removed) state.selectedCityId = removed.from;
-  renderRoutes();
-  renderPanel();
+  if (!state.tripPlan) return;
+  const placeIds = routePlaceIds(state.tripPlan);
+  if (placeIds.length < 2) return;
+  const result = reconcileRoutePlaces(state.tripPlan, placeIds.slice(0, -1));
+  if (result.blockedRemovals.length) {
+    updateArchiveStatus("\u672b\u5c3e\u5730\u70b9\u5305\u542b\u5df2\u7f16\u8f91\u5b89\u6392\uff0c\u6682\u672a\u64a4\u9500\u3002", "error");
+    return;
+  }
+  commitTripPlan(result.plan, { message: "\u5df2\u64a4\u9500\u5e76\u4fdd\u5b58\u3002" });
 }
 
 function clearRoutes() {
-  state.routes = [];
-  state.selectedCityId = null;
-  renderRoutes();
-  renderPanel();
+  state.tripHistory = [];
+  commitTripPlan(null, { recordHistory: false });
 }
 
-function exportRoutes() {
-  if (!state.routes.length) return;
+function buildCurrentGuideModel() {
+  const plan = state.tripPlan;
+  if (!Array.isArray(plan?.days) || !plan.days.length) {
+    throw new TypeError("\u5f53\u524d\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u65e5\u5386\u884c\u7a0b");
+  }
 
-  const totals = routeTotals();
-  const routePlaces = [placeById(state.routes[0].from), ...state.routes.map((route) => placeById(route.to))].filter(Boolean);
-  const currentTransport = transportProfile();
-  const payload = {
-    app: "Route Studio",
-    schemaVersion: 2,
-    exportedAt: new Date().toISOString(),
-    summary: {
-      transportMode: state.transportMode,
-      transportLabel: currentTransport.label,
-      cityCount: routePlaces.length,
-      segmentCount: state.routes.length,
-      chain: routePlaces.map(placeSnapshot),
-      distanceMeters: Math.round(totals.distanceMeters),
-      distanceText: totals.measuredSegmentCount ? formatDistance(totals.distanceMeters) : labels.pending,
-      durationSeconds: Math.round(totals.durationSeconds),
-      durationText: totals.measuredSegmentCount ? formatDuration(totals.durationSeconds) : labels.pending,
-      hasFallback: totals.hasFallback,
-      hasLoading: totals.hasLoading
-    },
-    segments: state.routes.map((route, index) => {
-      const from = placeById(route.from);
-      const to = placeById(route.to);
-      return {
-        index: index + 1,
-        from: placeSnapshot(from),
-        to: placeSnapshot(to),
-        status: route.status,
-        distanceMeters: hasMetrics(route) ? Math.round(route.distance) : null,
-        distanceText: hasMetrics(route) ? formatDistance(route.distance) : labels.pending,
-        durationSeconds: hasMetrics(route) ? Math.round(route.duration) : null,
-        durationText: hasMetrics(route) ? formatDuration(route.duration) : labels.pending,
-        transportMode: route.transportMode || state.transportMode,
-        transportLabel: route.transportLabel || currentTransport.label,
-        fallback: Boolean(route.fallback),
-        error: route.error || null
-      };
-    })
+  const referencedPlaceIds = new Set();
+  const addPlaceId = (placeId) => {
+    if (typeof placeId === "string" && placeId) referencedPlaceIds.add(placeId);
+  };
+  plan.days.forEach((day) => {
+    (Array.isArray(day?.cityEntries) ? day.cityEntries : []).forEach((entry) => addPlaceId(entry?.placeId));
+    addPlaceId(day?.overnightPlaceId);
+    (Array.isArray(day?.items) ? day.items : []).forEach((item) => {
+      addPlaceId(item?.placeId);
+      addPlaceId(item?.fromPlaceId);
+      addPlaceId(item?.toPlaceId);
+    });
+    addPlaceId(day?.lodging?.placeId);
+  });
+
+  const placeSnapshots = new Map();
+  referencedPlaceIds.forEach((placeId) => {
+    const snapshot = placeSnapshot(placeById(placeId));
+    if (snapshot) placeSnapshots.set(placeId, snapshot);
+  });
+
+  const routeSegments = state.routes.map((route) => {
+    const segment = {
+      fromPlaceId: route.from,
+      toPlaceId: route.to,
+      transportLabel: route.transportLabel || transportProfile(route.transportMode).label,
+      fallback: Boolean(route.fallback),
+      status: route.status === "success"
+        ? "ready"
+        : route.status === "loading"
+          ? "\u8ba1\u7b97\u4e2d"
+          : route.status === "error"
+            ? "\u65e0\u6cd5\u4f30\u7b97"
+            : route.status || labels.pending,
+      error: route.error || null
+    };
+    if (hasMetrics(route)) {
+      segment.distanceMeters = route.distance;
+      segment.durationSeconds = route.duration;
+    } else {
+      segment.distanceText = labels.pending;
+      segment.durationText = labels.pending;
+    }
+    return segment;
+  });
+  const routeSummary = routeTotals();
+  const totals = {
+    distanceText: routeSummary.measuredSegmentCount
+      ? formatDistance(routeSummary.distanceMeters)
+      : labels.pending,
+    durationText: routeSummary.measuredSegmentCount
+      ? formatDuration(routeSummary.durationSeconds)
+      : labels.pending,
+    segmentCount: state.routes.length,
+    dayCount: plan.days.length
   };
 
-  const blob = new Blob([JSON.stringify(payload, null, 2)], { type: "application/json;charset=utf-8" });
+  return buildGuideModel({
+    plan: state.tripPlan,
+    placeSnapshots: placeSnapshots,
+    warnings: validateTripPlan(plan, { paceProfile: tripPaceProfile(plan.pace) }),
+    routeSegments: routeSegments,
+    totals: totals
+  });
+}
+
+function guideFileName(plan, extension) {
+  return `${safeTripNameForFile(plan?.name)}-${timestampForFile()}.${extension}`;
+}
+
+function exportMarkdownGuide() {
+  if (!Array.isArray(state.tripPlan?.days) || !state.tripPlan.days.length) {
+    updateArchiveStatus("\u5f53\u524d\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u65e5\u5386\u884c\u7a0b\u3002", "error");
+    return;
+  }
+  try {
+    const plan = state.tripPlan;
+    const model = buildCurrentGuideModel();
+    const markdown = buildMarkdownGuide(model);
+    const filename = guideFileName(plan, "md");
+    downloadTextFile(markdown, filename, "text/markdown;charset=utf-8");
+    updateArchiveStatus(`Markdown \u65c5\u884c\u6307\u5357\u5df2\u5bfc\u51fa\uff1a${filename}`, "success");
+  } catch (error) {
+    console.error("Markdown guide export failed", error);
+    updateArchiveStatus("Markdown \u65c5\u884c\u6307\u5357\u5bfc\u51fa\u5931\u8d25\uff0c\u5f53\u524d\u884c\u7a0b\u672a\u66f4\u6539\u3002", "error");
+  }
+}
+
+function exportPrintableHtmlGuide() {
+  if (!Array.isArray(state.tripPlan?.days) || !state.tripPlan.days.length) {
+    updateArchiveStatus("\u5f53\u524d\u6ca1\u6709\u53ef\u5bfc\u51fa\u7684\u65e5\u5386\u884c\u7a0b\u3002", "error");
+    return;
+  }
+  try {
+    const plan = state.tripPlan;
+    const model = buildCurrentGuideModel();
+    const html = buildPrintableHtml(model);
+    const filename = guideFileName(plan, "html");
+    downloadTextFile(html, filename, "text/html;charset=utf-8");
+    updateArchiveStatus(`\u6253\u5370\u7248 HTML \u65c5\u884c\u6307\u5357\u5df2\u5bfc\u51fa\uff1a${filename}`, "success");
+  } catch (error) {
+    console.error("Printable HTML guide export failed", error);
+    updateArchiveStatus("\u6253\u5370\u7248 HTML \u65c5\u884c\u6307\u5357\u5bfc\u51fa\u5931\u8d25\uff0c\u5f53\u524d\u884c\u7a0b\u672a\u66f4\u6539\u3002", "error");
+  }
+}
+
+function downloadTextFile(text, filename, type) {
+  const blob = new Blob([text], { type });
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
-  link.download = `route-studio-${timestampForFile()}.json`;
+  link.download = filename;
   document.body.append(link);
   link.click();
   link.remove();
@@ -2268,6 +4080,8 @@ async function initApp() {
     selectionHint.textContent = "\u6b63\u5728\u8bfb\u53d6\u672c\u5730 GeoJSON \u548c\u57ce\u5e02\u5750\u6807\u6570\u636e...";
     await loadMapData();
     initMap();
+    restoreTripState();
+    setMobileView("plan");
     renderRoutes();
     renderPanel();
   } catch (error) {
@@ -2282,9 +4096,30 @@ async function initApp() {
 undoBtn.addEventListener("click", undoRoute);
 clearBtn.addEventListener("click", clearRoutes);
 resetViewBtn.addEventListener("click", resetMapView);
-exportBtn.addEventListener("click", exportRoutes);
+if (saveTripBtn) saveTripBtn.addEventListener("click", () => persistTripState("\u5df2\u624b\u52a8\u4fdd\u5b58\u5230\u672c\u673a\u3002"));
+if (shareTripBtn) shareTripBtn.addEventListener("click", copyShareLink);
+if (tripImportBtn && tripImportInput) {
+  tripImportBtn.addEventListener("click", () => tripImportInput.click());
+}
+if (tripImportInput) tripImportInput.addEventListener("change", importTripFile);
+if (exportTripFileBtn) exportTripFileBtn.addEventListener("click", exportTripFile);
+if (exportMarkdownBtn) exportMarkdownBtn.addEventListener("click", exportMarkdownGuide);
+if (exportHtmlBtn) exportHtmlBtn.addEventListener("click", exportPrintableHtmlGuide);
 exitCityViewBtn.addEventListener("click", () => exitCityView());
 transportButtons.forEach((button) => button.addEventListener("click", () => setTransportMode(button.dataset.mode)));
+paceButtons.forEach((button) => button.addEventListener("click", () => setTripPace(button.dataset.pace)));
+mobileViewButtons.forEach((button) => button.addEventListener("click", () => setMobileView(button.dataset.mobileView)));
+if (tripNameInput) tripNameInput.addEventListener("change", updateTripNameMetadata);
+if (tripStartDateInput) tripStartDateInput.addEventListener("change", updateTripStartDateMetadata);
+if (autoScheduleBtn) autoScheduleBtn.addEventListener("click", autoScheduleCurrentTrip);
+if (undoTripEditBtn) undoTripEditBtn.addEventListener("click", undoTripEdit);
+if (tripItemForm) tripItemForm.addEventListener("submit", submitTripItemForm);
+if (tripItemCancelBtn) tripItemCancelBtn.addEventListener("click", () => closeTripItemDialog());
+if (tripItemPlaceId) {
+  tripItemPlaceId.addEventListener("change", () => {
+    if (tripFormControl("type")?.value === "activity") renderTripLandmarkOptions(tripItemPlaceId.value);
+  });
+}
 citySearch.addEventListener("input", updateSearchResults);
 citySearch.addEventListener("keydown", (event) => {
   if (event.key !== "Enter" || !state.searchResults.length) return;
