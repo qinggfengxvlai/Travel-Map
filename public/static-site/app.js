@@ -1547,7 +1547,7 @@ function syncTripArchiveControls() {
   if (exportMarkdownBtn) exportMarkdownBtn.disabled = !hasCalendar;
   if (exportHtmlBtn) exportHtmlBtn.disabled = !hasCalendar;
   if (exportTripFileBtn) {
-    exportTripFileBtn.disabled = !canExportTripFile({
+    exportTripFileBtn.disabled = typeof canExportTripFile !== "function" || !canExportTripFile({
       plan: state.tripPlan,
       emergencyLegacyRaw: emergencyLegacyTripRaw
     });
@@ -2481,11 +2481,25 @@ function applyDeferredInternalFailure(error) {
   console.warn("deferred summaries unavailable", error);
 }
 
+async function initializeTripFeaturesAfterMapReady() {
+  try {
+    await loadTripControllerModule();
+    const initialRecovery = restoreTripState();
+    shouldRetryTripRestoreAfterCountyHydration = initialRecovery.status === "deferred";
+    mapController.setMobileView("plan");
+    mapController.renderRoutes();
+    renderPanel();
+    queueFoodPanelRender();
+  } catch (error) {
+    console.error("trip module unavailable", error);
+    selectionHint.textContent = "\u884c\u7a0b\u529f\u80fd\u52a0\u8f7d\u5931\u8d25\uff0c\u5730\u56fe\u4ecd\u53ef\u4f7f\u7528\u3002";
+  }
+}
+
 async function initApp() {
   try {
     selectionTitle.textContent = "\u6b63\u5728\u542f\u52a8 Leaflet Canvas";
     selectionHint.textContent = "\u6b63\u5728\u8bfb\u53d6\u672c\u5730 GeoJSON \u548c\u57ce\u5e02\u5750\u6807\u6570\u636e...";
-    const tripModuleLoading = loadTripControllerModule();
     await loadMapData();
     mapController = createMapController({
       L: window.L,
@@ -2521,14 +2535,13 @@ async function initApp() {
       }
     });
     mapController.init();
-    document.documentElement.dataset.appReady = "map";
-    await tripModuleLoading;
-    const initialRecovery = restoreTripState();
-    shouldRetryTripRestoreAfterCountyHydration = initialRecovery.status === "deferred";
     mapController.setMobileView("plan");
     mapController.renderRoutes();
     renderPanel();
-    queueFoodPanelRender();
+    document.documentElement.dataset.appReady = "map";
+    scheduleIdle(() => {
+      initializeTripFeaturesAfterMapReady();
+    });
     scheduleIdle(() => {
       loadCityDetailController().catch(reportCityDetailModuleFailure);
       hydrateDeferredSummaries()

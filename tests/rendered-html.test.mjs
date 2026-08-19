@@ -10,6 +10,7 @@ const cityDetailUrl = new URL("../public/static-site/city-detail.js", import.met
 const stylesUrl = new URL("../public/static-site/styles.css", import.meta.url);
 const packageUrl = new URL("../package.json", import.meta.url);
 const nginxUrl = new URL("../deploy/nginx.conf", import.meta.url);
+const headersUrl = new URL("../public/_headers", import.meta.url);
 const applicationModuleUrls = [
   "app.js",
   "app-data.js",
@@ -127,6 +128,13 @@ function arrowCallCallbackSource(source, callName) {
   return balancedCodeBlock(source, bodyStart, `${callName} arrow callback`);
 }
 
+function arrowCallCallbackSources(source, callName) {
+  const signature = new RegExp(`\\b${callName}\\s*\\(`, "g");
+  return [...source.matchAll(signature)].map((match) => (
+    arrowCallCallbackSource(source.slice(match.index), callName)
+  ));
+}
+
 test("arrow callback extraction excludes statements after the scheduled callback", () => {
   const incorrectStartup = "scheduleIdle(() => {}); hydrateDeferredSummaries();";
   const callback = arrowCallCallbackSource(incorrectStartup, "scheduleIdle");
@@ -168,6 +176,32 @@ test("static page loads the versioned app entry as a module", async () => {
   );
 });
 
+test("static page preloads critical startup modules", async () => {
+  const html = await readFile(htmlUrl, "utf8");
+
+  for (const moduleName of ["app", "app-data", "place-index", "map-core"]) {
+    assert.match(
+      html,
+      new RegExp(`<link\\s+rel=["']modulepreload["']\\s+href=["']\\.\\/${moduleName}\\.js\\?v=progressive-2["']\\s*\\/?>`)
+    );
+  }
+});
+
+test("static page preloads critical map JSON payloads", async () => {
+  const html = await readFile(htmlUrl, "utf8");
+  const payloads = [
+    "china-cities",
+    ...Array.from({ length: 8 }, (_, index) => `china-prefectures-lite-${index + 1}`)
+  ];
+
+  for (const payload of payloads) {
+    assert.match(
+      html,
+      new RegExp(`<link\\s+rel=["']preload["']\\s+href=["']\\.\\/data\\/${payload}\\.json\\?v=progressive-2["']\\s+as=["']fetch["']\\s+type=["']application\\/json["']\\s+crossorigin=["']anonymous["']\\s*\\/?>`)
+    );
+  }
+});
+
 test("release assets use one immutable cache version", async () => {
   const html = await readFile(htmlUrl, "utf8");
   const nginx = await readFile(nginxUrl, "utf8");
@@ -184,6 +218,13 @@ test("release assets use one immutable cache version", async () => {
   assert.match(nginx, /location\s*=\s*\/index\.html[\s\S]*?Cache-Control\s+"no-cache"/);
   assert.match(nginx, /location\s+~\*[\s\S]*?max-age=31536000[\s\S]*?immutable/);
   assert.match(nginx, /gzip_static\s+on/);
+});
+
+test("Cloudflare headers cache the versioned static site immutably", async () => {
+  const headers = await readFile(headersUrl, "utf8");
+
+  assert.match(headers, /\/static-site\/index\.html[\s\S]*?Cache-Control:\s*no-cache/);
+  assert.match(headers, /\/static-site\/\*[\s\S]*?Cache-Control:\s*public,\s*max-age=31536000,\s*immutable/);
 });
 
 test("static page contains accessible trip editing, import and JSON export controls", async () => {
@@ -311,18 +352,15 @@ test("app renders critical map data before hydrating optional summaries", async 
   assert.equal((app.match(/loadFoodSummary\s*\(/g) ?? []).length, 1);
 
   const initApp = functionSource(app, "initApp");
+  const tripStartup = functionSource(app, "initializeTripFeaturesAfterMapReady");
   const startupSteps = [
-    "loadTripControllerModule()",
     "await loadMapData()",
     "createMapController({",
     "mapController.init()",
-    'document.documentElement.dataset.appReady = "map"',
-    "await tripModuleLoading",
-    "restoreTripState()",
     'mapController.setMobileView("plan")',
     "mapController.renderRoutes()",
     "renderPanel()",
-    "queueFoodPanelRender()",
+    'document.documentElement.dataset.appReady = "map"',
     "scheduleIdle("
   ];
   let previousIndex = -1;
@@ -331,13 +369,22 @@ test("app renders critical map data before hydrating optional summaries", async 
     assert.ok(index > previousIndex, `expected ${step} after the previous startup step`);
     previousIndex = index;
   }
-  const idleCallback = arrowCallCallbackSource(initApp, "scheduleIdle");
-  assert.match(idleCallback, /hydrateDeferredSummaries\s*\(\s*\)/);
+  const idleCallbacks = arrowCallCallbackSources(initApp, "scheduleIdle");
+  assert.equal(idleCallbacks.length, 2);
+  const [tripIdleCallback, deferredIdleCallback] = idleCallbacks;
+  assert.match(tripIdleCallback, /initializeTripFeaturesAfterMapReady\s*\(\s*\)/);
+  assert.doesNotMatch(initApp, /await\s+loadTripControllerModule\s*\(\s*\)/);
+  assert.match(tripStartup, /await\s+loadTripControllerModule\s*\(\s*\)/);
+  assert.match(tripStartup, /restoreTripState\s*\(\s*\)/);
+  assert.match(tripStartup, /queueFoodPanelRender\s*\(\s*\)/);
+  assert.match(tripStartup, /shouldRetryTripRestoreAfterCountyHydration\s*=\s*initialRecovery\.status\s*===\s*["']deferred["']/);
+
+  assert.match(deferredIdleCallback, /loadCityDetailController\s*\(\s*\)/);
+  assert.match(deferredIdleCallback, /hydrateDeferredSummaries\s*\(\s*\)/);
   assert.match(
-    idleCallback,
+    deferredIdleCallback,
     /hydrateDeferredSummaries\s*\(\s*\)[\s\S]*?\.then\s*\([\s\S]*?applyDeferredReadiness/
   );
-  assert.match(initApp, /shouldRetryTripRestoreAfterCountyHydration\s*=\s*initialRecovery\.status\s*===\s*["']deferred["']/);
   assert.match(app, /failedBoundaryPaths:\s*\[\]/);
   assert.match(loadMapData, /state\.failedBoundaryPaths\s*=/);
   assert.match(app, /state\.failedBoundaryPaths\.length[\s\S]*?renderOperationalWarnings/);
@@ -371,7 +418,11 @@ test("app wires deferred recovery, merge precedence, retryability and readiness 
   const ensureFood = functionSource(foodContent, "ensureCity");
   const commit = functionSource(app, "commitTripPlan");
   const init = functionSource(app, "initApp");
-  const idleCallback = arrowCallCallbackSource(init, "scheduleIdle");
+  const tripStartup = functionSource(app, "initializeTripFeaturesAfterMapReady");
+  const idleCallback = arrowCallCallbackSources(init, "scheduleIdle").find((callback) => (
+    /hydrateDeferredSummaries\s*\(\s*\)/.test(callback)
+  ));
+  assert.ok(idleCallback, "expected deferred hydration to be scheduled during idle time");
 
   assert.match(prepareMigration, /prepareLegacyRecoveryData\s*\(/);
   assert.doesNotMatch(prepareMigration, /placeById\s*\(/);
@@ -381,7 +432,7 @@ test("app wires deferred recovery, merge precedence, retryability and readiness 
     restore.indexOf("selectTripRecoveryCandidate(") < restore.indexOf("backupLegacyTripRaw("),
     "candidate validation must precede legacy backup"
   );
-  assert.match(init, /initialRecovery\.status\s*===\s*["']deferred["']/);
+  assert.match(tripStartup, /initialRecovery\.status\s*===\s*["']deferred["']/);
   assert.doesNotMatch(init, /shouldRetryTripRestoreAfterCountyHydration\s*=\s*!state\.tripPlan/);
 
   assert.match(hydrate, /classifyDeferredSummaryData\s*\(/);
@@ -479,7 +530,7 @@ test("app wires visible trip import and JSON export controls", async () => {
   assert.match(app, /tripImportBtn\.addEventListener\s*\(\s*["']click["'][\s\S]*?tripImportInput\.click\s*\(/);
   assert.match(app, /tripImportInput\.addEventListener\s*\(\s*["']change["'][\s\S]*?queueTripAction\s*\(\s*\(\)\s*=>\s*importTripFile\s*\(\s*event\s*\)/);
   assert.match(app, /exportTripFileBtn\.addEventListener\s*\(\s*["']click["'][\s\S]*?queueTripAction\s*\(\s*\(\)\s*=>\s*exportTripFile\s*\(\s*\)/);
-  assert.match(app, /exportTripFileBtn\.disabled\s*=\s*!canExportTripFile\s*\(/);
+  assert.match(app, /exportTripFileBtn\.disabled\s*=\s*typeof\s+canExportTripFile\s*!==\s*["']function["']\s*\|\|\s*!canExportTripFile\s*\(/);
   assert.match(app, /function\s+exportTripFile\s*\([^)]*\)[\s\S]*?tripFileExportPayload\s*\([\s\S]*?downloadTextFile\s*\(/);
   assert.match(app, /exportPayload\.kind\s*===\s*["']legacy-emergency["'][\s\S]*?clearEmergencyLegacyTrip\s*\(/);
 });
